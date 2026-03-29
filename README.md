@@ -8,6 +8,8 @@
 - JSONL 原始日志落盘
 - SQLite 索引，支持管理后台检索与统计
 - 自动为流式聊天请求补充 `stream_options.include_usage=true`，恢复 token 用量可视化
+- 入库阶段自动完成 Token 结构分析（prompt 按角色、completion 按类别）并持久化
+- 支持基于新规则批量重分析历史记录（管理台一键触发）
 - 多轮对话关联：自动识别同一会话的请求并在 UI 中可视化
 - 基于 uv 的 Python 项目管理
 
@@ -46,7 +48,12 @@ PROVIDER_ROUTES_JSON='{"openai":"https://api.openai.com","claude":"https://api.a
 ## Token 用量可视化
 
 - 对于流式请求，代理会自动补齐 `stream_options.include_usage=true`，便于记录 provider 返回的官方 token 用量
-- 对于历史日志或 provider 未返回 `usage` 的场景，详情页会显示一个估算版 token 面板，提供 prompt 长度和输出长度参考，方便快速做 prompt 优化
+- 日志入库时会进行 `token_analysis`：
+	- prompt 按常见消息来源拆分：`system`、`user`、`assistant`、`tool`、`tools_schema`
+	- completion 按输出类别拆分：`text_output`、`reasoning`、`tool_calls`
+- 当 provider 返回真实 `usage` 时，面板优先展示真实总量，并按结构分析结果做比例映射展示
+- 对于历史日志或 provider 未返回 `usage` 的场景，详情页会展示估算版 token 面板，便于快速做 prompt 优化
+- 当 Token 统计规则升级后，可在管理台概览页点击「重新分析 Token」批量更新历史数据；后端接口：`POST /admin/api/reanalyze`（管理员权限）
 
 当配置了 `PROVIDER_ROUTES_JSON` 时，可通过前缀路由到不同 Provider：
 
@@ -67,3 +74,8 @@ PROVIDER_ROUTES_JSON='{"openai":"https://api.openai.com","claude":"https://api.a
 uv sync --extra dev
 uv run pytest
 ```
+
+## 版本
+
+- 当前版本：`0.3.0`
+- 最新标签：`v0.3.0`
