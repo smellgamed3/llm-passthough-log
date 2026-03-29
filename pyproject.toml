@@ -1,6 +1,6 @@
 [project]
 name = "llm-passthough-log"
-version = "0.1.0"
+version = "0.2.0"
 description = "Transparent LLM HTTP proxy with full request/response logging and admin console."
 readme = "README.md"
 requires-python = ">=3.9"

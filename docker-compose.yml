@@ -6,7 +6,7 @@ services:
     ports:
       - "${PORT:-8000}:8000"
     volumes:
-      - proxy-data:/app/data
+      - ./proxy-data:/app/data
     environment:
       - DOWNSTREAM_URL=${DOWNSTREAM_URL:-https://api.openai.com}
       - ADMIN_USERNAME=${ADMIN_USERNAME:?请在 .env 中设置 ADMIN_USERNAME}
@@ -16,6 +16,3 @@ services:
       - PROVIDER_ROUTES_JSON=${PROVIDER_ROUTES_JSON:-}
       - ADMIN_TITLE=${ADMIN_TITLE:-LLM 透明代理控制台}
     restart: unless-stopped
-
-volumes:
-  proxy-data:

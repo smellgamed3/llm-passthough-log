@@ -8,6 +8,7 @@
 - JSONL 原始日志落盘
 - SQLite 索引，支持管理后台检索与统计
 - 自动为流式聊天请求补充 `stream_options.include_usage=true`，恢复 token 用量可视化
+- 多轮对话关联：自动识别同一会话的请求并在 UI 中可视化
 - 基于 uv 的 Python 项目管理
 
 ## 运行
@@ -51,6 +52,14 @@ PROVIDER_ROUTES_JSON='{"openai":"https://api.openai.com","claude":"https://api.a
 
 - `/openai/v1/chat/completions`
 - `/claude/v1/messages`
+
+## 多轮对话关联
+
+代理会根据请求中的 system prompt、model、client IP 自动计算会话指纹 (`conv_fingerprint`)，将属于同一多轮对话的请求关联在一起：
+
+- Trace 列表中显示彩色会话标识和消息数，点击可筛选同一会话的所有请求
+- 详情面板新增「会话时间线」标签页，按时间顺序展示同一会话的全部调用
+- 支持通过 API `GET /admin/api/conversation/{fingerprint}` 查询会话时间线
 
 ## 开发
 
