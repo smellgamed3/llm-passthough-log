@@ -1,0 +1,118 @@
+name: Build & Publish Docker Image
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run tests
+        env:
+          ADMIN_USERNAME: test-admin
+          ADMIN_PASSWORD: test-pass
+        run: uv run pytest -v
+
+  smoke-test:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: llm-passthough-log:smoke-test
+
+      - name: Run container
+        run: |
+          docker run -d --name llm-proxy-smoke \
+            -e ADMIN_USERNAME=smoke-admin \
+            -e ADMIN_PASSWORD=smoke-pass \
+            -e DOWNSTREAM_URL=https://api.openai.com \
+            -p 8000:8000 \
+            llm-passthough-log:smoke-test
+
+      - name: Probe /admin endpoint
+        run: |
+          for i in {1..20}; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8000/admin || true)
+            if [ "$code" = "200" ]; then
+              echo "Smoke test passed."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Smoke test failed: /admin not reachable"
+          docker logs llm-proxy-smoke || true
+          exit 1
+
+      - name: Print container logs on failure
+        if: failure()
+        run: docker logs llm-proxy-smoke || true
+
+      - name: Cleanup container
+        if: always()
+        run: docker rm -f llm-proxy-smoke || true
+
+  build-and-push:
+    needs: smoke-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64

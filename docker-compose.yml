@@ -1,0 +1,21 @@
+services:
+  llm-proxy:
+    # build: .
+    # 发布后可替换为 ghcr.io 镜像:
+    image: ghcr.io/smellgamed3/llm-passthough-log:latest
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      - proxy-data:/app/data
+    environment:
+      - DOWNSTREAM_URL=${DOWNSTREAM_URL:-https://api.openai.com}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:?请在 .env 中设置 ADMIN_USERNAME}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD}
+      - LOG_DIR=/app/data
+      - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-300}
+      - PROVIDER_ROUTES_JSON=${PROVIDER_ROUTES_JSON:-}
+      - ADMIN_TITLE=${ADMIN_TITLE:-LLM 透明代理控制台}
+    restart: unless-stopped
+
+volumes:
+  proxy-data:
