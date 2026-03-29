@@ -55,6 +55,21 @@ cmd_start() {
     local host="${HOST:-0.0.0.0}"
     local port="${PORT:-8000}"
 
+    # 检查端口是否被残留进程占用
+    local stale_pids
+    stale_pids=$(lsof -ti :"$port" 2>/dev/null || true)
+    if [[ -n "$stale_pids" ]]; then
+        echo "⚠  端口 ${port} 被占用，清理残留进程 ..."
+        echo "$stale_pids" | xargs kill 2>/dev/null || true
+        sleep 1
+        # 如果还没退出，强制终止
+        stale_pids=$(lsof -ti :"$port" 2>/dev/null || true)
+        if [[ -n "$stale_pids" ]]; then
+            echo "$stale_pids" | xargs kill -9 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+
     echo "▸  启动 LLM 透明代理  →  ${host}:${port}"
     nohup uv run llm-proxy > "$LOG_FILE" 2>&1 &
     local new_pid=$!
