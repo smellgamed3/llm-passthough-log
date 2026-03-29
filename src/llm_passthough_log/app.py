@@ -46,6 +46,15 @@ SENSITIVE_FIELD_NAMES = {
 
 BEARER_TOKEN_RE = re.compile(r"(?i)\bbearer\s+([^\s,;]+)")
 SK_TOKEN_RE = re.compile(r"\bsk-[A-Za-z0-9._\-]+\b")
+URL_HOST_RE = re.compile(r"(https?://)([^/:@\s]+)((?::\d+)?(?:/[^\s\"'<>]*)?)")
+
+URL_FIELD_NAMES = {
+    "url",
+    "downstream_url",
+    "base_url",
+    "endpoint",
+    "target_url",
+}
 
 
 def normalize_field_name(name: str) -> str:
@@ -73,9 +82,27 @@ def mask_sensitive_text(value: str) -> str:
     return mask_secret(stripped)
 
 
+def _mask_url_match(m: re.Match) -> str:
+    scheme, host, rest = m.group(1), m.group(2), m.group(3) or ""
+    if len(host) <= 4:
+        masked = "*" * len(host)
+    elif len(host) <= 8:
+        masked = host[0] + "***" + host[-1]
+    else:
+        masked = host[:3] + "***" + host[-3:]
+    return f"{scheme}{masked}{rest}"
+
+
+def mask_url_host(value: str) -> str:
+    """Mask the host portion of URLs in *value*."""
+    return URL_HOST_RE.sub(_mask_url_match, value)
+
+
 def sanitize_string_for_web(value: str, key_name: Optional[str] = None) -> str:
     if key_name and normalize_field_name(key_name) in SENSITIVE_FIELD_NAMES:
         return mask_sensitive_text(value)
+    if key_name and normalize_field_name(key_name) in URL_FIELD_NAMES:
+        return mask_url_host(value)
 
     masked = BEARER_TOKEN_RE.sub(lambda match: f"Bearer {mask_secret(match.group(1))}", value)
     return SK_TOKEN_RE.sub(lambda match: mask_secret(match.group(0)), masked)
@@ -282,7 +309,7 @@ def create_app(
             "id": provider["id"],
             "name": sanitize_string_for_web(str(provider["name"])),
             "prefix_path": sanitize_string_for_web(str(provider["prefix_path"])),
-            "downstream_url": sanitize_string_for_web(str(provider.get("downstream_url") or "")),
+            "downstream_url": mask_url_host(str(provider.get("downstream_url") or "")),
             "enabled": int(bool(provider.get("enabled", 1))),
             "input_price": provider.get("input_price", 0),
             "output_price": provider.get("output_price", 0),

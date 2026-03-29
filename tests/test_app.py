@@ -543,6 +543,103 @@ def test_provider_api_masks_downstream_apikey_for_web(tmp_path):
         assert secret not in json.dumps(session_data.json(), ensure_ascii=False)
 
 
+def test_log_entry_masks_url_host(tmp_path):
+    """url 字段中的下游域名应被脱敏"""
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={"id": "resp_1", "choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+        )
+
+    app = create_app(build_settings(tmp_path), downstream_transport=httpx.MockTransport(handler))
+
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": "gpt-test", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert resp.status_code == 200
+
+    with TestClient(app) as client:
+        admin_headers = login_admin(client)
+        logs = client.get("/admin/api/logs", headers=admin_headers).json()
+        detail = client.get(f"/admin/api/logs/{logs['items'][0]['id']}", headers=admin_headers).json()
+        # url 字段的主机名应被脱敏（provider.test → pro***est）
+        assert "provider.test" not in detail["url"]
+        assert "***" in detail["url"]
+        # 路径应保留
+        assert "/v1/chat/completions" in detail["url"]
+
+    # 持久化层也应脱敏
+    import sqlite3
+    with sqlite3.connect(tmp_path / "logs.db") as conn:
+        row = conn.execute("SELECT entry_json FROM logs ORDER BY created_at DESC LIMIT 1").fetchone()
+        assert row is not None
+        entry_data = json.loads(row[0])
+        # url 字段中的域名应被脱敏
+        assert "provider.test" not in entry_data["url"]
+
+
+def test_provider_downstream_url_masked_in_web(tmp_path):
+    """Provider 的 downstream_url 在 Web API 中应脱敏"""
+    app = create_app(
+        build_settings(tmp_path),
+        downstream_transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True})),
+    )
+    downstream = "https://llm.internal-secret.example.com:30006"
+
+    with TestClient(app) as client:
+        admin_headers = login_admin(client)
+        resp = client.post(
+            "/admin/api/providers",
+            json={
+                "name": "URL Test",
+                "prefix_path": "urltest",
+                "downstream_url": downstream,
+            },
+            headers=admin_headers,
+        )
+        assert resp.status_code == 200
+        created = resp.json()
+        # 完整域名不应出现
+        assert "llm.internal-secret.example.com" not in created["downstream_url"]
+        assert "***" in created["downstream_url"]
+        # scheme 和 port 应保留
+        assert created["downstream_url"].startswith("https://")
+        assert ":30006" in created["downstream_url"]
+
+        # 列表接口也脱敏
+        listing = client.get("/admin/api/providers", headers=admin_headers).json()
+        for p in listing["items"]:
+            if p["id"] == created["id"]:
+                assert "llm.internal-secret.example.com" not in p["downstream_url"]
+                break
+
+        # settings 接口也脱敏
+        settings_resp = client.get("/admin/api/settings", headers=admin_headers).json()
+        if "downstream_url" in settings_resp:
+            assert "provider.test" not in settings_resp["downstream_url"]
+
+
+def test_mask_url_host_function():
+    """mask_url_host 单元测试"""
+    from llm_passthough_log.app import mask_url_host
+
+    # 长域名：保留前3后3
+    assert mask_url_host("https://llm.snow13.top:30006/v1/chat") == "https://llm***top:30006/v1/chat"
+    # 短域名 <=4：全部替换
+    assert mask_url_host("http://a.co/path") == "http://****/path"
+    # 中等域名 5-8
+    assert mask_url_host("https://ab.co.io/api") == "https://a***o/api"
+    # 无路径
+    assert mask_url_host("https://api.example.com") == "https://api***com"
+    # 非 URL 不变
+    assert mask_url_host("just plain text") == "just plain text"
+    # 空字符串
+    assert mask_url_host("") == ""
+
+
 def test_auth_required_when_admin_key_set(tmp_path):
     """系统必须先登录才能访问后台接口"""
     app = create_app(

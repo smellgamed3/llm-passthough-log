@@ -46,6 +46,14 @@ const SENSITIVE_KEYS = new Set([
   "token",
 ]);
 
+const URL_KEYS = new Set([
+  "url",
+  "downstream_url",
+  "base_url",
+  "endpoint",
+  "target_url",
+]);
+
 function normalizeSensitiveKey(key) {
   return String(key || "").trim().toLowerCase().replace(/-/g, "_");
 }
@@ -64,10 +72,24 @@ function maskSecretText(value) {
   return text.slice(0, 4) + "..." + text.slice(-4);
 }
 
+function maskUrlHost(value) {
+  const text = String(value || "");
+  return text.replace(/(https?:\/\/)([^\/:@\s]+)((?::\d+)?(?:\/[^\s"'<>]*)?)/g, (_, scheme, host, rest) => {
+    let masked;
+    if (host.length <= 4) masked = "*".repeat(host.length);
+    else if (host.length <= 8) masked = host[0] + "***" + host.slice(-1);
+    else masked = host.slice(0, 3) + "***" + host.slice(-3);
+    return scheme + masked + (rest || "");
+  });
+}
+
 function sanitizeDisplayValue(value, keyName) {
   if (typeof value !== "string") return value;
   if (keyName && SENSITIVE_KEYS.has(normalizeSensitiveKey(keyName))) {
     return maskSecretText(value);
+  }
+  if (keyName && URL_KEYS.has(normalizeSensitiveKey(keyName))) {
+    return maskUrlHost(value);
   }
   return value
     .replace(/\bBearer\s+([^\s,;]+)/gi, (_, token) => `Bearer ${maskSecretText(token)}`)

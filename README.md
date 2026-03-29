@@ -11,6 +11,7 @@
 - 入库阶段自动完成 Token 结构分析（prompt 按角色、completion 按类别）并持久化
 - 支持基于新规则批量重分析历史记录（管理台一键触发）
 - 多轮对话关联：自动识别同一会话的请求并在 UI 中可视化
+- 敏感信息脱敏：API Key、Bearer Token、下游 URL 域名等全链路自动脱敏
 - 基于 uv 的 Python 项目管理
 
 ## 运行
@@ -68,6 +69,16 @@ PROVIDER_ROUTES_JSON='{"openai":"https://api.openai.com","claude":"https://api.a
 - 详情面板新增「会话时间线」标签页，按时间顺序展示同一会话的全部调用
 - 支持通过 API `GET /admin/api/conversation/{fingerprint}` 查询会话时间线
 
+## 敏感信息脱敏
+
+代理在日志持久化、API 返回、前端展示三层均自动脱敏敏感信息：
+
+- **API Key / Bearer Token**：`authorization`、`api_key`、`access_token` 等字段自动遮罩，`sk-xxx...xxxx` 格式保留首尾
+- **下游 URL 域名**：`url`、`downstream_url`、`base_url` 等字段中的主机名被脱敏，保留 scheme、端口和路径
+  - 例：`https://llm.snow13.top:30006/v1/chat` → `https://llm***top:30006/v1/chat`
+- **Provider downstream_apikey**：仅返回脱敏后的掩码字段，原始值不出库
+- **全链路覆盖**：入库前脱敏（JSONL + SQLite）、API 返回时脱敏、前端 JS 双重校验
+
 ## 开发
 
 ```bash
@@ -87,5 +98,5 @@ uv run pytest
 
 ## 版本
 
-- 当前版本：`0.4.0`
-- 最新标签：`v0.4.0`
+- 当前版本：`0.4.1`
+- 最新标签：`v0.4.1`
