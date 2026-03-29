@@ -153,8 +153,17 @@ class Runtime:
         transport = self.downstream_transport or httpx.AsyncHTTPTransport(
             retries=1,
             http2=is_http2_available(),
+            limits=httpx.Limits(
+                max_connections=200,
+                max_keepalive_connections=40,
+                keepalive_expiry=30,
+            ),
         )
-        self.http_client = httpx.AsyncClient(timeout=timeout, follow_redirects=False, transport=transport)
+        self.http_client = httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=False,
+            transport=transport,
+        )
 
     async def shutdown(self) -> None:
         if self.http_client is not None:

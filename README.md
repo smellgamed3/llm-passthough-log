@@ -75,6 +75,16 @@ uv sync --extra dev
 uv run pytest
 ```
 
+## 性能与并发优化
+
+项目在高负载场景下做了以下优化，确保代理延迟低、吞吐量高：
+
+- **SQLite 读写分离**：持久化复用读/写连接（WAL 模式 + `synchronous=NORMAL`），避免每次请求新建连接
+- **日志批量写入**：后台 worker 批量收集最多 64 条日志，单事务写入 SQLite + 一次性追加 JSONL，大幅降低 I/O 开销
+- **用户认证缓存**：API Key 查询结果带 60s TTL 缓存，代理热路径不再逐次查库
+- **Provider 价格缓存**：同样 60s TTL，避免每条日志写入时查询价格表
+- **httpx 连接池调优**：max_connections=200, max_keepalive=40, keepalive_expiry=30s，适配 LLM 长连接场景
+
 ## 版本
 
 - 当前版本：`0.3.0`

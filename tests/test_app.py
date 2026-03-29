@@ -259,15 +259,15 @@ def test_preconsumed_response_drops_content_encoding_header(tmp_path):
 
 def test_log_worker_survives_single_write_failure(tmp_path, monkeypatch):
     calls = {"count": 0}
-    original_write = LogStore._write_entry_sync
+    original_prepare = LogStore._prepare_entry
 
-    def flaky_write(self, entry):
+    def flaky_prepare(self, entry):
         calls["count"] += 1
         if calls["count"] == 1:
             raise OSError("temporary write failure")
-        return original_write(self, entry)
+        return original_prepare(self, entry)
 
-    monkeypatch.setattr(LogStore, "_write_entry_sync", flaky_write)
+    monkeypatch.setattr(LogStore, "_prepare_entry", flaky_prepare)
 
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, headers={"content-type": "application/json"}, json={"ok": True})
@@ -317,7 +317,7 @@ def test_runtime_disables_http2_when_h2_missing(tmp_path, monkeypatch):
                 json={"path": request.url.path},
             )
 
-    def fake_async_http_transport(*, retries: int, http2: bool):
+    def fake_async_http_transport(*, retries: int, http2: bool, **kwargs):
         captured["http2"] = http2
         assert retries == 1
         return DummyTransport()

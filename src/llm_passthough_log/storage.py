@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -403,6 +404,10 @@ def build_preview(entry: Dict[str, Any], limit: int = 220) -> str:
 
 
 class LogStore:
+    _BATCH_SIZE = 64  # max entries per write transaction
+    _BATCH_LINGER_SECONDS = 0.1  # max wait before flushing a partial batch
+    _USER_CACHE_TTL = 60.0  # seconds to cache user lookups
+
     def __init__(self, jsonl_path: Path, sqlite_path: Path, queue_maxsize: int = 5000) -> None:
         self._jsonl_path = jsonl_path
         self._sqlite_path = sqlite_path
@@ -410,6 +415,34 @@ class LogStore:
         self._queue_maxsize = queue_maxsize
         self._queue: Optional[asyncio.Queue[Optional[Dict[str, Any]]]] = None
         self._worker_task: Optional[asyncio.Task[None]] = None
+        # Persistent connections: _read_conn for reads, _write_conn for writes
+        self._read_conn: Optional[sqlite3.Connection] = None
+        self._write_conn: Optional[sqlite3.Connection] = None
+        self._conn_lock = threading.Lock()
+        # User API key cache: api_key -> (user_dict | None, expiry_time)
+        self._user_cache: Dict[str, tuple] = {}
+        self._user_cache_lock = threading.Lock()
+        # Provider pricing cache: provider_name -> (pricing_tuple | None, expiry_time)
+        self._pricing_cache: Dict[str, tuple] = {}
+        self._pricing_cache_lock = threading.Lock()
+
+    def _get_read_conn(self) -> sqlite3.Connection:
+        with self._conn_lock:
+            if self._read_conn is None:
+                conn = sqlite3.connect(self._sqlite_path, check_same_thread=False)
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA query_only=ON")
+                self._read_conn = conn
+            return self._read_conn
+
+    def _get_write_conn(self) -> sqlite3.Connection:
+        with self._conn_lock:
+            if self._write_conn is None:
+                conn = sqlite3.connect(self._sqlite_path, check_same_thread=False)
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                self._write_conn = conn
+            return self._write_conn
 
     @property
     def queue_size(self) -> int:
@@ -431,11 +464,22 @@ class LogStore:
             await self._worker_task
             self._worker_task = None
         self._queue = None
+        with self._conn_lock:
+            if self._read_conn is not None:
+                self._read_conn.close()
+                self._read_conn = None
+            if self._write_conn is not None:
+                self._write_conn.close()
+                self._write_conn = None
 
     async def enqueue(self, entry: Dict[str, Any]) -> None:
         if self._queue is None:
             raise RuntimeError("log queue is not started")
-        await self._queue.put(entry)
+        try:
+            self._queue.put_nowait(entry)
+        except asyncio.QueueFull:
+            # Under extreme load, drop oldest isn't safe; just await
+            await self._queue.put(entry)
 
     async def overview(self, *, allowed_providers: Optional[List[str]] = None) -> Dict[str, Any]:
         return await asyncio.to_thread(self._overview_sync, allowed_providers)
@@ -483,15 +527,52 @@ class LogStore:
         if self._queue is None:
             return
         while True:
+            # Wait for first item
             item = await self._queue.get()
+            if item is None:
+                self._queue.task_done()
+                return
+            batch = [item]
+            # Drain up to _BATCH_SIZE - 1 more items with short linger
             try:
-                if item is None:
-                    return
-                try:
-                    await asyncio.to_thread(self._write_entry_sync, item)
-                except Exception as exc:
-                    await asyncio.to_thread(self._write_worker_error_sync, item, exc)
-            finally:
+                deadline = asyncio.get_event_loop().time() + self._BATCH_LINGER_SECONDS
+                while len(batch) < self._BATCH_SIZE:
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        break
+                    try:
+                        next_item = await asyncio.wait_for(self._queue.get(), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        break
+                    if next_item is None:
+                        self._queue.task_done()
+                        # Flush remaining batch then exit
+                        if batch:
+                            try:
+                                await asyncio.to_thread(self._write_batch_sync, batch)
+                            except Exception:
+                                for entry in batch:
+                                    try:
+                                        await asyncio.to_thread(self._write_worker_error_sync, entry, Exception("batch write failed"))
+                                    except Exception:
+                                        pass
+                            for _ in batch:
+                                self._queue.task_done()
+                        return
+                    batch.append(next_item)
+            except Exception:
+                pass
+            # Write the batch
+            try:
+                await asyncio.to_thread(self._write_batch_sync, batch)
+            except Exception:
+                # Fallback: try writing entries one by one
+                for entry in batch:
+                    try:
+                        await asyncio.to_thread(self._write_entry_sync, entry)
+                    except Exception as exc:
+                        await asyncio.to_thread(self._write_worker_error_sync, entry, exc)
+            for _ in batch:
                 self._queue.task_done()
 
     def _write_worker_error_sync(self, entry: Dict[str, Any], exc: Exception) -> None:
@@ -589,7 +670,8 @@ class LogStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_conv_fingerprint ON logs(conv_fingerprint)")
             conn.commit()
 
-    def _write_entry_sync(self, entry: Dict[str, Any]) -> None:
+    def _prepare_entry(self, entry: Dict[str, Any]) -> tuple:
+        """Prepare an entry for writing; returns (line, db_params) tuple."""
         request_body = entry.get("request_body")
         response_body = entry.get("response_body")
         search_blob = "\n".join(
@@ -613,47 +695,69 @@ class LogStore:
         mc = extract_msg_count(request_body)
         entry["conv_fingerprint"] = conv_fp
         entry["msg_count"] = mc
-        # Token breakdown analysis
         token_analysis = analyze_token_breakdown(entry)
         if token_analysis:
             entry["token_analysis"] = token_analysis
         line = dumps_json(entry)
+        db_params = (
+            entry["id"],
+            float(entry.get("timestamp", time.time())),
+            entry.get("method", "GET"),
+            entry.get("path", ""),
+            entry.get("query_string", ""),
+            entry.get("url", ""),
+            entry.get("provider", "default"),
+            extract_model(request_body),
+            int(extract_stream(request_body)),
+            entry.get("response_status"),
+            entry.get("duration_ms"),
+            search_blob,
+            preview,
+            line,
+            estimated_cost,
+            entry.get("user_id"),
+            conv_fp,
+            mc,
+        )
+        return line, db_params
 
+    _INSERT_SQL = """
+        INSERT OR REPLACE INTO logs (
+            id, created_at, method, path, query_string, target_url,
+            provider, request_model, request_stream, response_status,
+            duration_ms, search_blob, preview, entry_json,
+            estimated_cost, user_id, conv_fingerprint, msg_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
+    def _write_batch_sync(self, entries: List[Dict[str, Any]]) -> None:
+        """Write multiple entries in a single JSONL append + single DB transaction."""
+        prepared = []
+        for entry in entries:
+            try:
+                prepared.append(self._prepare_entry(entry))
+            except Exception as exc:
+                self._write_worker_error_sync(entry, exc)
+        if not prepared:
+            return
+        # Batch append to JSONL
+        with self._jsonl_path.open("a", encoding="utf-8") as handle:
+            for line, _ in prepared:
+                handle.write(line)
+                handle.write("\n")
+        # Batch insert to SQLite in one transaction
+        conn = self._get_write_conn()
+        conn.executemany(self._INSERT_SQL, [params for _, params in prepared])
+        conn.commit()
+
+    def _write_entry_sync(self, entry: Dict[str, Any]) -> None:
+        line, db_params = self._prepare_entry(entry)
         with self._jsonl_path.open("a", encoding="utf-8") as handle:
             handle.write(line)
             handle.write("\n")
-        with sqlite3.connect(self._sqlite_path) as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO logs (
-                    id, created_at, method, path, query_string, target_url,
-                    provider, request_model, request_stream, response_status,
-                    duration_ms, search_blob, preview, entry_json,
-                    estimated_cost, user_id, conv_fingerprint, msg_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    entry["id"],
-                    float(entry.get("timestamp", time.time())),
-                    entry.get("method", "GET"),
-                    entry.get("path", ""),
-                    entry.get("query_string", ""),
-                    entry.get("url", ""),
-                    entry.get("provider", "default"),
-                    extract_model(request_body),
-                    int(extract_stream(request_body)),
-                    entry.get("response_status"),
-                    entry.get("duration_ms"),
-                    search_blob,
-                    preview,
-                    line,
-                    estimated_cost,
-                    entry.get("user_id"),
-                    conv_fp,
-                    mc,
-                ),
-            )
-            conn.commit()
+        conn = self._get_write_conn()
+        conn.execute(self._INSERT_SQL, db_params)
+        conn.commit()
 
     def _overview_sync(self, allowed_providers: Optional[List[str]] = None) -> Dict[str, Any]:
         prov_filter = ""
@@ -664,7 +768,8 @@ class LogStore:
             placeholders = ",".join("?" * len(allowed_providers))
             prov_filter = f"WHERE provider IN ({placeholders})"
             prov_params = list(allowed_providers)
-        with sqlite3.connect(self._sqlite_path) as conn:
+        conn = self._get_read_conn()
+        with self._conn_lock:
             conn.row_factory = sqlite3.Row
             totals = conn.execute(
                 f"""
@@ -762,7 +867,8 @@ class LogStore:
             params.append(duration_max)
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         offset = max(page - 1, 0) * page_size
-        with sqlite3.connect(self._sqlite_path) as conn:
+        conn = self._get_read_conn()
+        with self._conn_lock:
             conn.row_factory = sqlite3.Row
             total_row = conn.execute(
                 f"SELECT COUNT(*) AS total FROM logs {where_sql}",
@@ -797,7 +903,8 @@ class LogStore:
         }
 
     def _get_log_sync(self, log_id: str) -> Optional[Dict[str, Any]]:
-        with sqlite3.connect(self._sqlite_path) as conn:
+        conn = self._get_read_conn()
+        with self._conn_lock:
             row = conn.execute("SELECT entry_json FROM logs WHERE id = ?", (log_id,)).fetchone()
         if row is None:
             return None
@@ -812,25 +919,25 @@ class LogStore:
         """Re-run analyze_token_breakdown on all stored entries and update."""
         total = 0
         updated = 0
-        with sqlite3.connect(self._sqlite_path) as conn:
-            rows = conn.execute("SELECT id, entry_json FROM logs").fetchall()
-            total = len(rows)
-            for row_id, entry_json_str in rows:
-                entry = json.loads(entry_json_str)
-                new_analysis = analyze_token_breakdown(entry)
-                old_analysis = entry.get("token_analysis")
-                if new_analysis != old_analysis:
-                    if new_analysis:
-                        entry["token_analysis"] = new_analysis
-                    elif "token_analysis" in entry:
-                        del entry["token_analysis"]
-                    new_json = dumps_json(entry)
-                    conn.execute(
-                        "UPDATE logs SET entry_json = ? WHERE id = ?",
-                        (new_json, row_id),
-                    )
-                    updated += 1
-            conn.commit()
+        conn = self._get_write_conn()
+        rows = conn.execute("SELECT id, entry_json FROM logs").fetchall()
+        total = len(rows)
+        for row_id, entry_json_str in rows:
+            entry = json.loads(entry_json_str)
+            new_analysis = analyze_token_breakdown(entry)
+            old_analysis = entry.get("token_analysis")
+            if new_analysis != old_analysis:
+                if new_analysis:
+                    entry["token_analysis"] = new_analysis
+                elif "token_analysis" in entry:
+                    del entry["token_analysis"]
+                new_json = dumps_json(entry)
+                conn.execute(
+                    "UPDATE logs SET entry_json = ? WHERE id = ?",
+                    (new_json, row_id),
+                )
+                updated += 1
+        conn.commit()
         return {"total": total, "updated": updated}
 
     # ── Conversation timeline ────────────────────────────────────────────
@@ -859,7 +966,8 @@ class LogStore:
             where.append(f"provider IN ({placeholders})")
             params.extend(allowed_providers)
         where_sql = "WHERE " + " AND ".join(where)
-        with sqlite3.connect(self._sqlite_path) as conn:
+        conn = self._get_read_conn()
+        with self._conn_lock:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 f"""
@@ -926,15 +1034,18 @@ class LogStore:
         user_id = str(uuid.uuid4())
         created_at = time.time()
         pw_hash = hash_password(password) if password else None
-        with sqlite3.connect(self._sqlite_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO users (id, name, api_key, downstream_url, downstream_apikey, enabled, notes, created_at, role, password_hash)
-                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
-                """,
-                (user_id, name, api_key, downstream_url or None, downstream_apikey or None, notes or None, created_at, role, pw_hash),
-            )
-            conn.commit()
+        conn = self._get_write_conn()
+        conn.execute(
+            """
+            INSERT INTO users (id, name, api_key, downstream_url, downstream_apikey, enabled, notes, created_at, role, password_hash)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+            """,
+            (user_id, name, api_key, downstream_url or None, downstream_apikey or None, notes or None, created_at, role, pw_hash),
+        )
+        conn.commit()
+        # Invalidate user cache
+        with self._user_cache_lock:
+            self._user_cache.clear()
         result = self._get_user_sync(user_id)
         assert result is not None
         return result
@@ -947,7 +1058,8 @@ class LogStore:
             params.extend([f"%{query}%", f"%{query}%"])
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         offset = max(page - 1, 0) * page_size
-        with sqlite3.connect(self._sqlite_path) as conn:
+        conn = self._get_read_conn()
+        with self._conn_lock:
             conn.row_factory = sqlite3.Row
             total_row = conn.execute(
                 f"SELECT COUNT(*) AS total FROM users {where_sql}", params
@@ -973,7 +1085,8 @@ class LogStore:
         }
 
     def _get_user_sync(self, user_id: str) -> Optional[Dict[str, Any]]:
-        with sqlite3.connect(self._sqlite_path) as conn:
+        conn = self._get_read_conn()
+        with self._conn_lock:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT id, name, api_key, downstream_url, downstream_apikey, enabled, notes, created_at, role FROM users WHERE id = ?",
@@ -982,16 +1095,27 @@ class LogStore:
         return dict(row) if row else None
 
     def _get_user_by_apikey_sync(self, api_key: str) -> Optional[Dict[str, Any]]:
-        with sqlite3.connect(self._sqlite_path) as conn:
+        # Check cache first
+        now = time.time()
+        with self._user_cache_lock:
+            cached = self._user_cache.get(api_key)
+            if cached and cached[1] > now:
+                return cached[0]
+        conn = self._get_read_conn()
+        with self._conn_lock:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT id, name, api_key, downstream_url, downstream_apikey, enabled, notes, created_at, role FROM users WHERE api_key = ?",
                 (api_key,),
             ).fetchone()
-        return dict(row) if row else None
+        result = dict(row) if row else None
+        with self._user_cache_lock:
+            self._user_cache[api_key] = (result, now + self._USER_CACHE_TTL)
+        return result
 
     def _get_user_by_credentials_sync(self, name: str, password: str) -> Optional[Dict[str, Any]]:
-        with sqlite3.connect(self._sqlite_path) as conn:
+        conn = self._get_read_conn()
+        with self._conn_lock:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT id, name, api_key, downstream_url, downstream_apikey, enabled, notes, created_at, role, password_hash FROM users WHERE name = ?",
@@ -1013,17 +1137,23 @@ class LogStore:
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values: List[Any] = list(updates.values())
         values.append(user_id)
-        with sqlite3.connect(self._sqlite_path) as conn:
-            conn.execute(f"UPDATE users SET {set_clause} WHERE id = ?", values)
-            conn.commit()
+        conn = self._get_write_conn()
+        conn.execute(f"UPDATE users SET {set_clause} WHERE id = ?", values)
+        conn.commit()
+        # Invalidate user cache
+        with self._user_cache_lock:
+            self._user_cache.clear()
         return self._get_user_sync(user_id)
 
     def _delete_user_sync(self, user_id: str) -> bool:
-        with sqlite3.connect(self._sqlite_path) as conn:
-            cursor = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
-            conn.execute("DELETE FROM user_providers WHERE user_id = ?", (user_id,))
-            conn.commit()
-            return cursor.rowcount > 0
+        conn = self._get_write_conn()
+        cursor = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.execute("DELETE FROM user_providers WHERE user_id = ?", (user_id,))
+        conn.commit()
+        # Invalidate user cache
+        with self._user_cache_lock:
+            self._user_cache.clear()
+        return cursor.rowcount > 0
 
     # ── Providers ────────────────────────────────────────────────────────
 
@@ -1065,23 +1195,27 @@ class LogStore:
     ) -> Dict[str, Any]:
         provider_id = str(uuid.uuid4())
         created_at = time.time()
-        with sqlite3.connect(self._sqlite_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO providers (id, name, prefix_path, downstream_url, downstream_apikey,
-                    enabled, input_price, output_price, notes, created_at)
-                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
-                """,
-                (provider_id, name, prefix_path, downstream_url,
-                 downstream_apikey or None, input_price, output_price, notes or None, created_at),
-            )
-            conn.commit()
+        conn = self._get_write_conn()
+        conn.execute(
+            """
+            INSERT INTO providers (id, name, prefix_path, downstream_url, downstream_apikey,
+                enabled, input_price, output_price, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+            """,
+            (provider_id, name, prefix_path, downstream_url,
+             downstream_apikey or None, input_price, output_price, notes or None, created_at),
+        )
+        conn.commit()
+        # Invalidate pricing cache
+        with self._pricing_cache_lock:
+            self._pricing_cache.clear()
         result = self._get_provider_sync(provider_id)
         assert result is not None
         return result
 
     def _list_providers_sync(self) -> List[Dict[str, Any]]:
-        with sqlite3.connect(self._sqlite_path) as conn:
+        conn = self._get_read_conn()
+        with self._conn_lock:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT id, name, prefix_path, downstream_url, downstream_apikey, enabled, input_price, output_price, notes, created_at FROM providers ORDER BY created_at DESC"
@@ -1089,7 +1223,8 @@ class LogStore:
         return [dict(row) for row in rows]
 
     def _get_provider_sync(self, provider_id: str) -> Optional[Dict[str, Any]]:
-        with sqlite3.connect(self._sqlite_path) as conn:
+        conn = self._get_read_conn()
+        with self._conn_lock:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT id, name, prefix_path, downstream_url, downstream_apikey, enabled, input_price, output_price, notes, created_at FROM providers WHERE id = ?",
@@ -1107,20 +1242,27 @@ class LogStore:
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values: List[Any] = list(updates.values())
         values.append(provider_id)
-        with sqlite3.connect(self._sqlite_path) as conn:
-            conn.execute(f"UPDATE providers SET {set_clause} WHERE id = ?", values)
-            conn.commit()
+        conn = self._get_write_conn()
+        conn.execute(f"UPDATE providers SET {set_clause} WHERE id = ?", values)
+        conn.commit()
+        # Invalidate pricing cache
+        with self._pricing_cache_lock:
+            self._pricing_cache.clear()
         return self._get_provider_sync(provider_id)
 
     def _delete_provider_sync(self, provider_id: str) -> bool:
-        with sqlite3.connect(self._sqlite_path) as conn:
-            cursor = conn.execute("DELETE FROM providers WHERE id = ?", (provider_id,))
-            conn.execute("DELETE FROM user_providers WHERE provider_id = ?", (provider_id,))
-            conn.commit()
-            return cursor.rowcount > 0
+        conn = self._get_write_conn()
+        cursor = conn.execute("DELETE FROM providers WHERE id = ?", (provider_id,))
+        conn.execute("DELETE FROM user_providers WHERE provider_id = ?",(provider_id,))
+        conn.commit()
+        # Invalidate pricing cache
+        with self._pricing_cache_lock:
+            self._pricing_cache.clear()
+        return cursor.rowcount > 0
 
     def _list_enabled_providers_sync(self) -> List[Dict[str, Any]]:
-        with sqlite3.connect(self._sqlite_path) as conn:
+        conn = self._get_read_conn()
+        with self._conn_lock:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT id, name, prefix_path, downstream_url, downstream_apikey, enabled, input_price, output_price FROM providers WHERE enabled = 1"
@@ -1140,19 +1282,21 @@ class LogStore:
         return await asyncio.to_thread(self._get_user_allowed_providers_sync, user_id)
 
     def _set_user_providers_sync(self, user_id: str, provider_ids: List[str]) -> None:
-        with sqlite3.connect(self._sqlite_path) as conn:
-            conn.execute("DELETE FROM user_providers WHERE user_id = ?", (user_id,))
-            for pid in provider_ids:
-                conn.execute("INSERT OR IGNORE INTO user_providers (user_id, provider_id) VALUES (?, ?)", (user_id, pid))
-            conn.commit()
+        conn = self._get_write_conn()
+        conn.execute("DELETE FROM user_providers WHERE user_id = ?", (user_id,))
+        for pid in provider_ids:
+            conn.execute("INSERT OR IGNORE INTO user_providers (user_id, provider_id) VALUES (?, ?)", (user_id, pid))
+        conn.commit()
 
     def _get_user_provider_ids_sync(self, user_id: str) -> List[str]:
-        with sqlite3.connect(self._sqlite_path) as conn:
+        conn = self._get_read_conn()
+        with self._conn_lock:
             rows = conn.execute("SELECT provider_id FROM user_providers WHERE user_id = ?", (user_id,)).fetchall()
         return [r[0] for r in rows]
 
     def _get_user_allowed_providers_sync(self, user_id: str) -> List[str]:
-        with sqlite3.connect(self._sqlite_path) as conn:
+        conn = self._get_read_conn()
+        with self._conn_lock:
             rows = conn.execute(
                 "SELECT p.prefix_path FROM user_providers up JOIN providers p ON up.provider_id = p.id WHERE up.user_id = ? AND p.enabled = 1",
                 (user_id,),
@@ -1196,11 +1340,18 @@ class LogStore:
         return None
 
     def _get_provider_pricing_sync(self, provider_name: str) -> Optional[tuple]:
-        with sqlite3.connect(self._sqlite_path) as conn:
+        now = time.time()
+        with self._pricing_cache_lock:
+            cached = self._pricing_cache.get(provider_name)
+            if cached and cached[1] > now:
+                return cached[0]
+        conn = self._get_read_conn()
+        with self._conn_lock:
             row = conn.execute(
                 "SELECT input_price, output_price FROM providers WHERE prefix_path = ? OR name = ?",
                 (provider_name, provider_name),
             ).fetchone()
-        if row and (row[0] or row[1]):
-            return (row[0], row[1])
-        return None
+        result = (row[0], row[1]) if row and (row[0] or row[1]) else None
+        with self._pricing_cache_lock:
+            self._pricing_cache[provider_name] = (result, now + self._USER_CACHE_TTL)
+        return result
