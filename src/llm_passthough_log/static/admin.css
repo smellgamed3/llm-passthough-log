@@ -1439,4 +1439,135 @@ dialog::backdrop {
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--bg-active); border-radius: 3px; }
+
+/* ── Conversation fingerprint badge ───────────────── */
+
+.tc-conv {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-family: var(--mono);
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--fp-color, #888) 15%, transparent);
+  color: var(--fp-color, #888);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tc-conv:hover {
+  background: color-mix(in srgb, var(--fp-color, #888) 28%, transparent);
+}
+.tc-conv-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fp-color, #888);
+  flex-shrink: 0;
+}
+
+/* ── Conversation timeline ────────────────────────── */
+
+.conv-timeline-wrap {
+  padding: 8px 0;
+}
+.conv-timeline-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.conv-fp {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--mono);
+  font-weight: 600;
+}
+.conv-count {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.conv-timeline {
+  position: relative;
+  padding-left: 14px;
+}
+.conv-tl-item {
+  position: relative;
+  padding: 8px 12px 8px 20px;
+  margin-left: 4px;
+  border-left: 2px solid var(--border);
+  cursor: pointer;
+  border-radius: 0 6px 6px 0;
+  transition: background 0.15s;
+}
+.conv-tl-item:hover {
+  background: var(--bg-hover);
+}
+.conv-tl-item.current {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-left-color: var(--accent);
+}
+.conv-tl-item:last-child {
+  border-left-color: transparent;
+}
+.conv-tl-dot {
+  position: absolute;
+  left: -6px;
+  top: 14px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 2px solid var(--border);
+}
+.conv-tl-item.current .conv-tl-dot {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.conv-tl-content {
+  font-size: 12px;
+}
+.conv-tl-row1 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+.conv-tl-idx {
+  font-weight: 700;
+  color: var(--text-secondary);
+  font-size: 11px;
+  min-width: 22px;
+}
+.conv-tl-model {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.conv-tl-msgs {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 1px 4px;
+  background: var(--bg-active);
+  border-radius: 3px;
+  color: var(--text-secondary);
+}
+.conv-tl-row2 {
+  display: flex;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.conv-tl-preview {
+  color: var(--text-secondary);
+  font-size: 11px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 400px;
+}
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }

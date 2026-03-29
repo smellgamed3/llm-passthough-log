@@ -429,6 +429,16 @@ def create_app(
                 raise HTTPException(status_code=403, detail="access denied")
         return sanitize_for_web(log_entry)
 
+    @app.get("/admin/api/conversation/{fingerprint}", include_in_schema=False)
+    async def admin_conversation_timeline(fingerprint: str, request: Request) -> Dict[str, Any]:
+        user = await _resolve_user(request)
+        user = _require_auth(user)
+        allowed = await _get_allowed_providers(user)
+        items = await runtime.log_store.list_conversation_logs(
+            fingerprint, allowed_providers=allowed
+        )
+        return sanitize_for_web({"items": items, "fingerprint": fingerprint})
+
     # ── User management API ───────────────────────────────────────────────
 
     @app.get("/admin/api/users", include_in_schema=False)

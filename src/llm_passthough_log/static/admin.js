@@ -24,6 +24,14 @@ function esc(v) {
   return String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 }
 
+/* fingerprint → stable HSL color */
+function fpColor(fp) {
+  if (!fp) return "transparent";
+  let h = 0;
+  for (let i = 0; i < fp.length; i++) h = ((h << 5) - h + fp.charCodeAt(i)) | 0;
+  return `hsl(${((h % 360) + 360) % 360}, 60%, 55%)`;
+}
+
 const SENSITIVE_KEYS = new Set([
   "authorization",
   "proxy_authorization",
@@ -399,6 +407,16 @@ document.querySelectorAll(".nav-btn").forEach(btn => {
 
 function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
+/* ── 会话关联筛选 ─────────────────────────────────── */
+
+function filterConversation(fp) {
+  state.filters.q = fp;
+  state.page = 1;
+  const searchInput = document.querySelector('#searchForm input[name="q"]');
+  if (searchInput) searchInput.value = fp;
+  loadLogs();
+}
+
 /* ── 概览 ─────────────────────────────────────────── */
 
 async function loadOverview() {
@@ -460,12 +478,16 @@ async function loadLogs() {
     const stream = i.request_stream ? '<span class="tc-stream">⚡</span>' : "";
     const cost = i.estimated_cost ? `<span class="tc-cost">${fmtCost(i.estimated_cost)}</span>` : "";
     const preview = sanitizeDisplayValue(i.preview || "", "preview");
+    const fpBadge = i.conv_fingerprint
+      ? `<span class="tc-conv" data-fp="${esc(i.conv_fingerprint)}" title="会话 ${esc(i.conv_fingerprint)}\n点击查看关联请求" style="--fp-color:${fpColor(i.conv_fingerprint)}" onclick="event.stopPropagation();filterConversation('${esc(i.conv_fingerprint)}')"><span class="tc-conv-dot"></span>${i.msg_count || 0}msg</span>`
+      : "";
     return `
       <div class="trace-card${active}" data-id="${i.id}">
         <div class="tc-row1">
           <span class="tc-method ${methodCls}">${esc(i.method)}</span>
           <span class="tc-model">${esc(i.request_model || i.path)}</span>
           ${stream}
+          ${fpBadge}
           ${cost}
           <span class="tc-status ${statusCls}">${i.response_status ?? "-"}</span>
         </div>
@@ -627,12 +649,15 @@ function renderDetail(entry) {
         <div class="dm-item"><span class="dm-label">时间</span><span class="dm-value">${fmtTimeFull(entry.timestamp)}</span></div>
         ${usage ? `<div class="dm-item"><span class="dm-label">Tokens</span><span class="dm-value">${usage.total_tokens ?? (usage.prompt_tokens || 0) + (usage.completion_tokens || 0)}</span></div>` : ""}
         ${entry.estimated_cost ? `<div class="dm-item"><span class="dm-label">成本</span><span class="dm-value cost-value">${fmtCost(entry.estimated_cost)}</span></div>` : ""}
+        ${entry.conv_fingerprint ? `<div class="dm-item"><span class="dm-label">会话</span><span class="dm-value"><span class="tc-conv" style="--fp-color:${fpColor(entry.conv_fingerprint)};cursor:pointer" onclick="filterConversation('${esc(entry.conv_fingerprint)}')"><span class="tc-conv-dot"></span>${esc(entry.conv_fingerprint)}</span></span></div>` : ""}
+        ${entry.msg_count ? `<div class="dm-item"><span class="dm-label">消息数</span><span class="dm-value">${entry.msg_count}</span></div>` : ""}
       </div>
       <div class="detail-tabs">
         <button class="tab-btn active" data-tab="friendly">友好视图</button>
         <button class="tab-btn" data-tab="messages">消息 <span class="tab-badge">${msgCount}</span></button>
         ${toolCount ? `<button class="tab-btn" data-tab="tools">工具 <span class="tab-badge">${toolCount}</span></button>` : ""}
         <button class="tab-btn" data-tab="response">回复${respToolCount ? ` <span class="tab-badge">${respToolCount} calls</span>` : ""}</button>
+        ${entry.conv_fingerprint ? '<button class="tab-btn" data-tab="timeline">会话时间线</button>' : ""}
         <button class="tab-btn" data-tab="headers">Headers</button>
         <button class="tab-btn" data-tab="raw">JSON</button>
       </div>
@@ -685,6 +710,11 @@ function renderDetail(entry) {
   html += renderHeadersSection("响应头", entry.response_headers);
   html += '</div>';
 
+  // ── Tab: Timeline (lazy loaded) ──
+  if (entry.conv_fingerprint) {
+    html += `<div class="tab-panel" data-panel="timeline"><div id="timelineContent" class="conv-timeline-wrap"><div style="color:var(--text-muted);padding:20px">加载中…</div></div></div>`;
+  }
+
   // ── Tab: Raw ──
   html += '<div class="tab-panel" data-panel="raw">';
   html += '<div class="json-view">' + highlightJSON(entry) + '</div>';
@@ -702,11 +732,72 @@ function renderDetail(entry) {
       btn.classList.add("active");
       pane.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
       pane.querySelector(`[data-panel="${btn.dataset.tab}"]`).classList.add("active");
+      if (btn.dataset.tab === "timeline" && entry.conv_fingerprint) {
+        loadTimeline(entry.conv_fingerprint, entry.id);
+      }
     });
   });
 }
 
 /* ── Token 面板 ───────────────────────────────────── */
+
+/* ── 会话时间线 ───────────────────────────────────── */
+
+async function loadTimeline(fp, currentId) {
+  const wrap = document.getElementById("timelineContent");
+  if (!wrap) return;
+  try {
+    const data = await fetchJSON(`/admin/api/conversation/${encodeURIComponent(fp)}`);
+    const items = data.items || [];
+    if (!items.length) {
+      wrap.innerHTML = '<div style="color:var(--text-muted);padding:16px">无关联请求</div>';
+      return;
+    }
+    let html = `<div class="conv-timeline-header"><span class="conv-fp" style="--fp-color:${fpColor(fp)}"><span class="tc-conv-dot"></span>会话 ${esc(fp)}</span><span class="conv-count">${items.length} 个请求</span></div>`;
+    html += '<div class="conv-timeline">';
+    items.forEach((item, idx) => {
+      const isCurrent = item.id === currentId;
+      const statusCls = (item.response_status >= 400) ? "err" : "ok";
+      const stream = item.request_stream ? '⚡' : '';
+      html += `
+        <div class="conv-tl-item${isCurrent ? ' current' : ''}" data-tl-id="${item.id}">
+          <div class="conv-tl-dot"></div>
+          <div class="conv-tl-line"></div>
+          <div class="conv-tl-content">
+            <div class="conv-tl-row1">
+              <span class="conv-tl-idx">#${idx + 1}</span>
+              <span class="conv-tl-model">${esc(item.request_model || item.path)}</span>
+              <span class="conv-tl-msgs">${item.msg_count || 0} msg</span>
+              ${stream ? '<span class="tc-stream">⚡</span>' : ''}
+              <span class="tc-status ${statusCls}" style="font-size:11px">${item.response_status ?? "-"}</span>
+            </div>
+            <div class="conv-tl-row2">
+              <span>${fmtTime(item.created_at)}</span>
+              <span>${fmtMs(item.duration_ms)}</span>
+              ${item.estimated_cost ? `<span class="tc-cost">${fmtCost(item.estimated_cost)}</span>` : ''}
+            </div>
+            <div class="conv-tl-preview">${esc(sanitizeDisplayValue(item.preview || "", "preview"))}</div>
+          </div>
+        </div>`;
+    });
+    html += '</div>';
+    wrap.innerHTML = html;
+    // Click to navigate
+    wrap.querySelectorAll("[data-tl-id]").forEach(el => {
+      el.addEventListener("click", () => {
+        const id = el.dataset.tlId;
+        state.selectedTraceId = id;
+        loadDetail(id);
+        // Highlight in trace list if visible
+        document.querySelectorAll(".trace-card.active").forEach(c => c.classList.remove("active"));
+        const card = document.querySelector(`.trace-card[data-id="${id}"]`);
+        if (card) card.classList.add("active");
+      });
+    });
+  } catch (err) {
+    wrap.innerHTML = `<div style="color:var(--text-muted);padding:16px">加载失败: ${esc(err.message)}</div>`;
+  }
+}
 
 /* role → display label / CSS class */
 const ROLE_META = {

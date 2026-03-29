@@ -61,6 +61,48 @@ def extract_stream(payload: Any) -> bool:
     return bool(payload.get("stream")) if isinstance(payload, dict) else False
 
 
+def compute_conversation_fingerprint(
+    request_body: Any,
+    model: Optional[str] = None,
+    client: Optional[str] = None,
+) -> Optional[str]:
+    """Generate a fingerprint to group related multi-turn conversations.
+
+    Uses SHA-256 of (system_prompt_prefix + model + client) truncated to 12 hex chars.
+    Returns None if no messages are found.
+    """
+    if not isinstance(request_body, dict):
+        return None
+    messages = request_body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return None
+    # Extract system prompt (first message with role=system)
+    system_content = ""
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "system":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                system_content = content[:500]  # first 500 chars to bound hash input
+            elif isinstance(content, list):
+                parts = []
+                for p in content:
+                    if isinstance(p, dict) and isinstance(p.get("text"), str):
+                        parts.append(p["text"])
+                system_content = "\n".join(parts)[:500]
+            break
+    seed = f"{system_content}|{model or ''}|{client or ''}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+
+
+def extract_msg_count(request_body: Any) -> int:
+    """Return the number of messages in a chat completion request."""
+    if isinstance(request_body, dict):
+        messages = request_body.get("messages")
+        if isinstance(messages, list):
+            return len(messages)
+    return 0
+
+
 def generate_api_key() -> str:
     """Generate a cryptographically random sk-prefixed API key."""
     return "sk-" + secrets.token_urlsafe(32)
@@ -299,6 +341,11 @@ class LogStore:
                 conn.execute("ALTER TABLE logs ADD COLUMN estimated_cost REAL DEFAULT 0")
             if "user_id" not in cols:
                 conn.execute("ALTER TABLE logs ADD COLUMN user_id TEXT")
+            if "conv_fingerprint" not in cols:
+                conn.execute("ALTER TABLE logs ADD COLUMN conv_fingerprint TEXT")
+            if "msg_count" not in cols:
+                conn.execute("ALTER TABLE logs ADD COLUMN msg_count INTEGER DEFAULT 0")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_conv_fingerprint ON logs(conv_fingerprint)")
             conn.commit()
 
     def _write_entry_sync(self, entry: Dict[str, Any]) -> None:
@@ -317,6 +364,14 @@ class LogStore:
         preview = build_preview(entry)
         estimated_cost = self._compute_cost_sync(entry)
         entry["estimated_cost"] = estimated_cost
+        conv_fp = compute_conversation_fingerprint(
+            request_body,
+            model=extract_model(request_body),
+            client=entry.get("client"),
+        )
+        mc = extract_msg_count(request_body)
+        entry["conv_fingerprint"] = conv_fp
+        entry["msg_count"] = mc
         line = dumps_json(entry)
 
         with self._jsonl_path.open("a", encoding="utf-8") as handle:
@@ -329,8 +384,8 @@ class LogStore:
                     id, created_at, method, path, query_string, target_url,
                     provider, request_model, request_stream, response_status,
                     duration_ms, search_blob, preview, entry_json,
-                    estimated_cost, user_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    estimated_cost, user_id, conv_fingerprint, msg_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry["id"],
@@ -349,6 +404,8 @@ class LogStore:
                     line,
                     estimated_cost,
                     entry.get("user_id"),
+                    conv_fp,
+                    mc,
                 ),
             )
             conn.commit()
@@ -470,7 +527,7 @@ class LogStore:
                 f"""
                 SELECT id, created_at, method, path, query_string, target_url, provider,
                        request_model, request_stream, response_status, duration_ms, preview,
-                       estimated_cost
+                       estimated_cost, conv_fingerprint, msg_count
                 FROM logs
                 {where_sql}
                 ORDER BY created_at DESC
@@ -500,6 +557,51 @@ class LogStore:
         if row is None:
             return None
         return json.loads(row[0])
+
+    # ── Conversation timeline ────────────────────────────────────────────
+
+    async def list_conversation_logs(
+        self,
+        fingerprint: str,
+        *,
+        allowed_providers: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        return await asyncio.to_thread(
+            self._list_conversation_logs_sync, fingerprint, allowed_providers
+        )
+
+    def _list_conversation_logs_sync(
+        self,
+        fingerprint: str,
+        allowed_providers: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        where = ["conv_fingerprint = ?"]
+        params: List[Any] = [fingerprint]
+        if allowed_providers is not None:
+            if not allowed_providers:
+                return []
+            placeholders = ",".join("?" * len(allowed_providers))
+            where.append(f"provider IN ({placeholders})")
+            params.extend(allowed_providers)
+        where_sql = "WHERE " + " AND ".join(where)
+        with sqlite3.connect(self._sqlite_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"""
+                SELECT id, created_at, method, path, provider,
+                       request_model, request_stream, response_status,
+                       duration_ms, preview, estimated_cost, msg_count
+                FROM logs
+                {where_sql}
+                ORDER BY created_at ASC
+                LIMIT 200
+                """,
+                params,
+            ).fetchall()
+        return [
+            {**dict(row), "preview": sanitize_preview_text(str(dict(row).get("preview") or ""))}
+            for row in rows
+        ]
 
     # ── Users ────────────────────────────────────────────────────────────
 
