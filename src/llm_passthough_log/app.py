@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -14,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 
 from llm_passthough_log.config import Settings
-from llm_passthough_log.storage import LogStore, decode_payload, generate_api_key, hash_password
+from llm_passthough_log.storage import LogStore, decode_payload, dumps_json, generate_api_key, hash_password
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -47,6 +48,18 @@ def filter_response_headers(headers: httpx.Headers) -> Dict[str, str]:
 
 def is_http2_available() -> bool:
     return importlib.util.find_spec("h2") is not None
+    
+def ensure_stream_usage(request_body: Any) -> Any:
+    if not isinstance(request_body, dict) or not request_body.get("stream"):
+        return request_body
+    stream_options = request_body.get("stream_options")
+    if isinstance(stream_options, dict) and stream_options.get("include_usage") is True:
+        return request_body
+    updated = dict(request_body)
+    updated_stream_options = dict(stream_options) if isinstance(stream_options, dict) else {}
+    updated_stream_options["include_usage"] = True
+    updated["stream_options"] = updated_stream_options
+    return updated
 
 
 async def read_response_body(response: httpx.Response) -> bytes:
@@ -70,6 +83,7 @@ class Runtime:
         self.log_store = LogStore(settings.jsonl_path, settings.sqlite_path, settings.queue_maxsize)
         self.http_client: Optional[httpx.AsyncClient] = None
         self._provider_cache: Dict[str, Dict[str, Any]] = {}
+        self._sessions: Dict[str, Dict[str, Any]] = {}
 
     async def startup(self) -> None:
         await self.log_store.start()
@@ -119,6 +133,22 @@ class Runtime:
                 return p["downstream_apikey"]
         return None
 
+    def create_session(self, user: Dict[str, Any]) -> str:
+        token = secrets.token_urlsafe(32)
+        self._sessions[token] = {
+            "id": user["id"],
+            "name": user["name"],
+            "role": user.get("role", "user"),
+            "enabled": user.get("enabled", 1),
+        }
+        return token
+
+    def get_session_user(self, token: str) -> Optional[Dict[str, Any]]:
+        return self._sessions.get(token)
+
+    def delete_session(self, token: str) -> None:
+        self._sessions.pop(token, None)
+
 
 def create_app(
     settings: Optional[Settings] = None,
@@ -160,21 +190,30 @@ def create_app(
     async def favicon() -> Response:
         return Response(status_code=204)
 
+    def _admin_user() -> Dict[str, Any]:
+        return {
+            "id": "__admin__",
+            "name": resolved_settings.admin_username,
+            "role": "admin",
+            "enabled": 1,
+        }
+
+    def _serialize_user(user: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "id": user["id"],
+            "name": user["name"],
+            "role": user.get("role", "user"),
+            "enabled": int(bool(user.get("enabled", 1))),
+            "created_at": user.get("created_at"),
+        }
+
     # ── Auth helpers ──────────────────────────────────────────────────────
 
     async def _resolve_user(request: Request) -> Optional[Dict[str, Any]]:
-        key = request.headers.get("x-api-key", "")
-        if key:
-            if resolved_settings.admin_api_key and key == resolved_settings.admin_api_key:
-                return {"id": "__admin__", "name": "Admin", "role": "admin", "enabled": 1}
-            user = await runtime.log_store.get_user_by_apikey(key)
-            if user and user.get("enabled"):
-                return user
+        token = request.headers.get("x-session-token", "") or request.headers.get("x-api-key", "")
+        if not token:
             return None
-        # No key: if admin_api_key not configured, allow anonymous admin access
-        if not resolved_settings.admin_api_key:
-            return {"id": "__anon__", "name": "Anonymous", "role": "admin", "enabled": 1}
-        return None
+        return runtime.get_session_user(token)
 
     def _require_admin(user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if not user:
@@ -199,40 +238,35 @@ def create_app(
     @app.post("/admin/api/login", include_in_schema=False)
     async def admin_login(request: Request) -> Dict[str, Any]:
         data = await request.json()
-        # Support name + password login
         name = str(data.get("name", "")).strip()
         password = str(data.get("password", "")).strip()
-        if name and password:
-            user = await runtime.log_store.get_user_by_credentials(name, password)
-            if not user or not user.get("enabled"):
-                raise HTTPException(status_code=401, detail="用户名或密码错误")
-            provider_ids = await runtime.log_store.get_user_provider_ids(user["id"])
-            return {
-                "user": {"id": user["id"], "name": user["name"], "role": user.get("role", "user")},
-                "api_key": user["api_key"],
-                "provider_ids": provider_ids,
-            }
-        # Fallback: admin API key login
-        api_key = str(data.get("api_key", "")).strip()
-        if api_key:
-            if resolved_settings.admin_api_key and api_key == resolved_settings.admin_api_key:
-                return {"user": {"id": "__admin__", "name": "Admin", "role": "admin"}, "api_key": api_key}
-            user = await runtime.log_store.get_user_by_apikey(api_key)
-            if not user or not user.get("enabled"):
-                raise HTTPException(status_code=401, detail="无效的 API Key")
-            provider_ids = await runtime.log_store.get_user_provider_ids(user["id"])
-            return {
-                "user": {"id": user["id"], "name": user["name"], "role": user.get("role", "user")},
-                "api_key": api_key,
-                "provider_ids": provider_ids,
-            }
-        raise HTTPException(status_code=422, detail="请提供用户名和密码")
+        if not name or not password:
+            raise HTTPException(status_code=422, detail="请提供用户名和密码")
+        if name == resolved_settings.admin_username and password == resolved_settings.admin_password:
+            admin_user = _admin_user()
+            return {"user": _serialize_user(admin_user), "session_token": runtime.create_session(admin_user)}
+        user = await runtime.log_store.get_user_by_credentials(name, password)
+        if not user or not user.get("enabled"):
+            raise HTTPException(status_code=401, detail="用户名或密码错误")
+        provider_ids = await runtime.log_store.get_user_provider_ids(user["id"])
+        return {
+            "user": _serialize_user(user),
+            "session_token": runtime.create_session(user),
+            "provider_ids": provider_ids,
+        }
+
+    @app.post("/admin/api/logout", include_in_schema=False)
+    async def admin_logout(request: Request) -> Dict[str, Any]:
+        token = request.headers.get("x-session-token", "") or request.headers.get("x-api-key", "")
+        if token:
+            runtime.delete_session(token)
+        return {"ok": True}
 
     @app.get("/admin/api/session", include_in_schema=False)
     async def admin_session(request: Request) -> Dict[str, Any]:
         user = await _resolve_user(request)
         user = _require_auth(user)
-        result: Dict[str, Any] = {"user": {"id": user["id"], "name": user["name"], "role": user.get("role", "user")}}
+        result: Dict[str, Any] = {"user": _serialize_user(user)}
         if user.get("role") == "admin":
             result["providers"] = await runtime.log_store.list_providers()
         else:
@@ -323,7 +357,9 @@ def create_app(
         user = await _resolve_user(request)
         _require_admin(user)
         bounded_page_size = min(page_size, resolved_settings.admin_page_size_max)
-        return await runtime.log_store.list_users(query=q, page=page, page_size=bounded_page_size)
+        payload = await runtime.log_store.list_users(query=q, page=page, page_size=bounded_page_size)
+        payload["items"] = [_serialize_user(item) for item in payload["items"]]
+        return payload
 
     @app.post("/admin/api/users", include_in_schema=False)
     async def admin_create_user(request: Request) -> Dict[str, Any]:
@@ -333,11 +369,10 @@ def create_app(
         name = str(data.get("name", "")).strip()
         if not name:
             raise HTTPException(status_code=422, detail="name is required")
-        api_key = str(data.get("api_key", "")).strip() or generate_api_key()
         password = str(data.get("password", "")).strip() or None
-        role = str(data.get("role", "user")).strip()
-        if role not in ("admin", "user"):
-            role = "user"
+        if not password:
+            raise HTTPException(status_code=422, detail="password is required")
+        api_key = str(data.get("api_key", "")).strip() or generate_api_key()
         new_user = await runtime.log_store.create_user(
             name=name,
             api_key=api_key,
@@ -345,13 +380,15 @@ def create_app(
             downstream_url=data.get("downstream_url") or None,
             downstream_apikey=data.get("downstream_apikey") or None,
             notes=data.get("notes") or None,
-            role=role,
+            role="user",
         )
         # Set provider permissions
         provider_ids = data.get("provider_ids")
         if isinstance(provider_ids, list):
             await runtime.log_store.set_user_providers(new_user["id"], provider_ids)
-        return new_user
+        payload = _serialize_user(new_user)
+        payload["provider_ids"] = await runtime.log_store.get_user_provider_ids(new_user["id"])
+        return payload
 
     @app.get("/admin/api/users/{user_id}", include_in_schema=False)
     async def admin_get_user(user_id: str, request: Request) -> Dict[str, Any]:
@@ -360,15 +397,16 @@ def create_app(
         user = await runtime.log_store.get_user(user_id)
         if user is None:
             raise HTTPException(status_code=404, detail="user not found")
-        user["provider_ids"] = await runtime.log_store.get_user_provider_ids(user_id)
-        return user
+        payload = _serialize_user(user)
+        payload["provider_ids"] = await runtime.log_store.get_user_provider_ids(user_id)
+        return payload
 
     @app.put("/admin/api/users/{user_id}", include_in_schema=False)
     async def admin_update_user(user_id: str, request: Request) -> Dict[str, Any]:
         caller = await _resolve_user(request)
         _require_admin(caller)
         data = await request.json()
-        allowed_fields = {"name", "api_key", "downstream_url", "downstream_apikey", "enabled", "notes", "role"}
+        allowed_fields = {"name", "api_key", "downstream_url", "downstream_apikey", "notes", "enabled"}
         updates: Dict[str, Any] = {}
         for field in allowed_fields:
             if field not in data:
@@ -380,11 +418,6 @@ def create_app(
                 updates[field] = name
             elif field == "enabled":
                 updates[field] = int(bool(data[field]))
-            elif field == "role":
-                role = str(data[field]).strip()
-                if role not in ("admin", "user"):
-                    role = "user"
-                updates[field] = role
             else:
                 updates[field] = data[field] or None
         # Handle password update
@@ -398,8 +431,9 @@ def create_app(
         provider_ids = data.get("provider_ids")
         if isinstance(provider_ids, list):
             await runtime.log_store.set_user_providers(user_id, provider_ids)
-        user["provider_ids"] = await runtime.log_store.get_user_provider_ids(user_id)
-        return user
+        payload = _serialize_user(user)
+        payload["provider_ids"] = await runtime.log_store.get_user_provider_ids(user_id)
+        return payload
 
     @app.delete("/admin/api/users/{user_id}", include_in_schema=False)
     async def admin_delete_user(user_id: str, request: Request) -> Dict[str, Any]:
@@ -498,6 +532,9 @@ def create_app(
         started_at = time.perf_counter()
         raw_body = await request.body()
         request_body = decode_payload(raw_body)
+        request_body = ensure_stream_usage(request_body)
+        if isinstance(request_body, dict):
+            raw_body = dumps_json(request_body).encode("utf-8")
 
         outgoing_headers = filter_request_headers(dict(request.headers))
 
@@ -633,7 +670,12 @@ def create_app(
     return app
 
 
-app = create_app()
+try:
+    app = create_app()
+except ValueError as exc:
+    if "ADMIN_USERNAME and ADMIN_PASSWORD must be set" not in str(exc):
+        raise
+    app = FastAPI(title="LLM Passthough Log")
 
 
 def main() -> None:

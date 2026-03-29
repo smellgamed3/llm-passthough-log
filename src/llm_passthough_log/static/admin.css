@@ -145,6 +145,12 @@ body.role-admin .admin-only { display: revert; }
   color: var(--text-secondary);
 }
 
+.token-note {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 .main-area {
   flex: 1;
   overflow: hidden;

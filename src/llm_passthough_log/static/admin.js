@@ -13,7 +13,7 @@ const state = {
   userPages: 1,
   userQuery: "",
   pathFilter: "chat/completions",
-  apiKey: localStorage.getItem("llm_proxy_api_key") || "",
+  sessionToken: localStorage.getItem("llm_proxy_session_token") || "",
   currentUser: null,
   allProviders: [],
 };
@@ -27,7 +27,7 @@ function esc(v) {
 async function fetchJSON(url, opts) {
   opts = opts || {};
   if (!opts.headers) opts.headers = {};
-  if (state.apiKey) opts.headers["X-Api-Key"] = state.apiKey;
+  if (state.sessionToken) opts.headers["X-Session-Token"] = state.sessionToken;
   const r = await fetch(url, opts);
   if (r.status === 401) { showLogin(); throw new Error("需要登录"); }
   const t = await r.text();
@@ -77,6 +77,58 @@ function fmtCost(v) {
   return "$" + v.toFixed(3);
 }
 
+function estimateTokenCount(text) {
+  if (!text) return 0;
+  const normalized = String(text);
+  const asciiChars = (normalized.match(/[\u0000-\u007f]/g) || []).length;
+  const nonAsciiChars = normalized.length - asciiChars;
+  return Math.max(1, Math.round(asciiChars / 4 + nonAsciiChars * 1.15));
+}
+
+function collectContentText(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(collectContentText).join("\n");
+  if (typeof value === "object") {
+    if (typeof value.text === "string") return value.text;
+    if (typeof value.content === "string") return value.content;
+    if (Array.isArray(value.content)) return value.content.map(collectContentText).join("\n");
+    return Object.values(value).map(collectContentText).join("\n");
+  }
+  return String(value);
+}
+
+function estimateUsage(entry, resp) {
+  const requestBody = entry?.request_body;
+  const promptParts = [];
+  if (requestBody && typeof requestBody === "object") {
+    if (typeof requestBody.prompt === "string") promptParts.push(requestBody.prompt);
+    if (typeof requestBody.input === "string") promptParts.push(requestBody.input);
+    if (Array.isArray(requestBody.messages)) {
+      requestBody.messages.forEach(msg => promptParts.push(collectContentText(msg?.content)));
+    }
+  }
+  const responseParts = [];
+  if (resp?.content) responseParts.push(resp.content);
+  if (resp?.reasoning) responseParts.push(resp.reasoning);
+  if (Array.isArray(resp?.toolCalls)) {
+    resp.toolCalls.forEach(tc => responseParts.push(tc?.function?.arguments || ""));
+  }
+  const promptText = promptParts.filter(Boolean).join("\n");
+  const completionText = responseParts.filter(Boolean).join("\n");
+  if (!promptText && !completionText) return null;
+  const promptTokens = estimateTokenCount(promptText);
+  const completionTokens = estimateTokenCount(completionText);
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
+    estimated: true,
+    prompt_chars: promptText.length,
+    completion_chars: completionText.length,
+  };
+}
+
 /* ── 登录 / 角色 ─────────────────────────────────── */
 
 function showLogin() {
@@ -117,9 +169,9 @@ document.getElementById("loginSubmitBtn").addEventListener("click", async () => 
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || "登录失败");
-    state.apiKey = data.api_key || "";
+    state.sessionToken = data.session_token || "";
     state.currentUser = data.user;
-    if (state.apiKey) localStorage.setItem("llm_proxy_api_key", state.apiKey);
+    if (state.sessionToken) localStorage.setItem("llm_proxy_session_token", state.sessionToken);
     document.getElementById("loginDialog").close();
     applyRole(data.user.role);
     boot();
@@ -135,9 +187,10 @@ document.getElementById("loginPassword").addEventListener("keydown", (e) => {
 });
 
 document.getElementById("logoutBtn").addEventListener("click", () => {
-  state.apiKey = "";
+  fetchJSON("/admin/api/logout", { method: "POST" }).catch(() => {});
+  state.sessionToken = "";
   state.currentUser = null;
-  localStorage.removeItem("llm_proxy_api_key");
+  localStorage.removeItem("llm_proxy_session_token");
   location.reload();
 });
 
@@ -483,7 +536,7 @@ function renderDetail(entry) {
 
   // ── Tab: Friendly ──
   html += '<div class="tab-panel active" data-panel="friendly">';
-  html += renderTokenPanel(usage);
+  html += renderTokenPanel(usage, entry, resp);
   html += renderParamsSection(reqBody);
   if (messages && messages.length) {
     html += '<div style="margin-bottom:16px"><h4 style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">消息线程</h4>';
@@ -549,13 +602,14 @@ function renderDetail(entry) {
 
 /* ── Token 面板 ───────────────────────────────────── */
 
-function renderTokenPanel(usage) {
-  if (!usage) return "";
-  const prompt = usage.prompt_tokens ?? 0;
-  const compl = usage.completion_tokens ?? 0;
-  const total = usage.total_tokens || (prompt + compl);
-  const reasoning = usage.completion_tokens_details?.reasoning_tokens ?? 0;
-  const cached = usage.prompt_tokens_details?.cached_tokens ?? 0;
+function renderTokenPanel(usage, entry, resp) {
+  const effectiveUsage = usage || estimateUsage(entry, resp);
+  if (!effectiveUsage) return "";
+  const prompt = effectiveUsage.prompt_tokens ?? 0;
+  const compl = effectiveUsage.completion_tokens ?? 0;
+  const total = effectiveUsage.total_tokens || (prompt + compl);
+  const reasoning = effectiveUsage.completion_tokens_details?.reasoning_tokens ?? 0;
+  const cached = effectiveUsage.prompt_tokens_details?.cached_tokens ?? 0;
   const actualPrompt = prompt - cached;
   const actualCompl = compl - reasoning;
 
@@ -580,8 +634,15 @@ function renderTokenPanel(usage) {
   if (cached > 0 && prompt > 0) {
     items.push(`<div class="ts-item">缓存率<strong>${((cached/prompt)*100).toFixed(1)}%</strong></div>`);
   }
-
-  return `<div class="token-panel"><h4>Token 用量</h4><div class="token-bar">${bar}</div><div class="token-stats">${items.join("")}</div></div>`;
+  if (effectiveUsage.estimated) {
+    items.push(`<div class="ts-item">Prompt 字符<strong>${effectiveUsage.prompt_chars}</strong></div>`);
+    items.push(`<div class="ts-item">输出字符<strong>${effectiveUsage.completion_chars}</strong></div>`);
+  }
+  const note = effectiveUsage.estimated
+    ? '<div class="token-note">当前记录未返回官方 usage，以上为字符长度估算；新流式请求已自动补齐 usage 回传。</div>'
+    : "";
+  const title = effectiveUsage.estimated ? "Token 用量（估算）" : "Token 用量";
+  return `<div class="token-panel"><h4>${title}</h4><div class="token-bar">${bar}</div><div class="token-stats">${items.join("")}</div>${note}</div>`;
 }
 
 function tsItem(cls, label, val) {
@@ -786,15 +847,13 @@ async function loadUsers() {
 
   const tbody = document.getElementById("userRows");
   if (!items.length) {
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">暂无用户</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">暂无用户</td></tr>';
     return;
   }
 
   tbody.innerHTML = items.map(u => {
-    const roleBadge = u.role === 'admin' ? '<span class="badge admin">admin</span>' : '<span class="badge user-role">user</span>';
     return `<tr>
       <td>${esc(u.name)}</td>
-      <td>${roleBadge}</td>
       <td>-</td>
       <td>${fmtTimeFull(u.created_at)}</td>
       <td><div class="action-btns">
@@ -828,7 +887,6 @@ const dlgNodes = {
   name: document.getElementById("fieldName"),
   password: document.getElementById("fieldPassword"),
   labelPassword: document.getElementById("labelPassword"),
-  role: document.getElementById("fieldRole"),
   providers: document.getElementById("fieldProviders"),
 };
 
@@ -839,7 +897,6 @@ function openDlg(title, data) {
   dlgNodes.name.value = data.name || "";
   dlgNodes.password.value = "";
   dlgNodes.labelPassword.textContent = isEdit ? "密码（留空不修改）" : "密码 *";
-  dlgNodes.role.value = data.role || "user";
   // Render provider checkboxes
   const selectedIds = new Set(data.provider_ids || []);
   dlgNodes.providers.innerHTML = state.allProviders.map(p =>
@@ -857,7 +914,6 @@ document.getElementById("dialogSubmitBtn").addEventListener("click", async () =>
   const providerIds = [...dlgNodes.providers.querySelectorAll("input:checked")].map(cb => cb.value);
   const body = {
     name: dlgNodes.name.value.trim(),
-    role: dlgNodes.role.value,
     provider_ids: providerIds,
   };
   const password = dlgNodes.password.value;

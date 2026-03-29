@@ -1,4 +1,5 @@
 import gzip
+import json
 
 import httpx
 from fastapi.testclient import TestClient
@@ -7,6 +8,10 @@ from llm_passthough_log import app as app_module
 from llm_passthough_log.app import create_app
 from llm_passthough_log.config import Settings
 from llm_passthough_log.storage import LogStore
+
+
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "admin-pass"
 
 
 def build_settings(tmp_path):
@@ -23,8 +28,27 @@ def build_settings(tmp_path):
         admin_page_size_default=20,
         admin_page_size_max=100,
         default_provider_name="provider.test",
-        admin_api_key=None,
+        admin_username=ADMIN_USERNAME,
+        admin_password=ADMIN_PASSWORD,
     )
+
+
+def login_admin(client: TestClient) -> dict[str, str]:
+    response = client.post(
+        "/admin/api/login",
+        json={"name": ADMIN_USERNAME, "password": ADMIN_PASSWORD},
+    )
+    assert response.status_code == 200
+    return {"X-Session-Token": response.json()["session_token"]}
+
+
+def login_user(client: TestClient, name: str, password: str) -> dict[str, str]:
+    response = client.post(
+        "/admin/api/login",
+        json={"name": name, "password": password},
+    )
+    assert response.status_code == 200
+    return {"X-Session-Token": response.json()["session_token"]}
 
 
 def test_proxy_logs_non_stream_request(tmp_path):
@@ -51,10 +75,11 @@ def test_proxy_logs_non_stream_request(tmp_path):
         assert response.json()["choices"][0]["message"]["content"] == "ok"
 
     with TestClient(app) as client:
-        logs = client.get("/admin/api/logs").json()
+        admin_headers = login_admin(client)
+        logs = client.get("/admin/api/logs", headers=admin_headers).json()
         assert logs["pagination"]["total"] == 1
         assert logs["items"][0]["request_model"] == "gpt-test"
-        detail = client.get(f"/admin/api/logs/{logs['items'][0]['id']}").json()
+        detail = client.get(f"/admin/api/logs/{logs['items'][0]['id']}", headers=admin_headers).json()
         assert detail["response_status"] == 200
         assert detail["request_body"]["messages"][0]["content"] == "hello"
 
@@ -77,10 +102,32 @@ def test_proxy_supports_sse_passthrough(tmp_path):
         assert "data: [DONE]" in response.text
 
     with TestClient(app) as client:
-        logs = client.get("/admin/api/logs").json()
+        admin_headers = login_admin(client)
+        logs = client.get("/admin/api/logs", headers=admin_headers).json()
         assert logs["pagination"]["total"] == 1
-        detail = client.get(f"/admin/api/logs/{logs['items'][0]['id']}").json()
+        detail = client.get(f"/admin/api/logs/{logs['items'][0]['id']}", headers=admin_headers).json()
         assert detail["response_body"].startswith("data: {\"delta\":\"hello\"}")
+
+
+def test_proxy_forces_stream_include_usage(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload["stream"] is True
+        assert payload["stream_options"]["include_usage"] is True
+        body = b"data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\ndata: [DONE]\n\n"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=body,
+        )
+
+    transport = httpx.MockTransport(handler)
+    app = create_app(build_settings(tmp_path), downstream_transport=transport)
+
+    with TestClient(app) as client:
+        response = client.post("/v1/stream", json={"stream": True, "messages": [{"role": "user", "content": "hello"}]})
+        assert response.status_code == 200
+        assert "total_tokens" in response.text
 
 
 def test_preconsumed_response_drops_content_encoding_header(tmp_path):
@@ -133,7 +180,8 @@ def test_log_worker_survives_single_write_failure(tmp_path, monkeypatch):
     assert error_log.exists()
 
     with TestClient(app) as client:
-        logs = client.get("/admin/api/logs").json()
+        admin_headers = login_admin(client)
+        logs = client.get("/admin/api/logs", headers=admin_headers).json()
         assert logs["pagination"]["total"] == 1
         assert logs["items"][0]["request_model"] == "second"
 
@@ -194,61 +242,59 @@ def test_user_crud_lifecycle(tmp_path):
     )
 
     with TestClient(app) as client:
+        admin_headers = login_admin(client)
         # 创建用户
-        resp = client.post("/admin/api/users", json={"name": "测试用户", "api_key": "sk-test-key-001"})
+        resp = client.post("/admin/api/users", json={"name": "测试用户", "password": "test-password-001"}, headers=admin_headers)
         assert resp.status_code == 200
         user = resp.json()
         uid = user["id"]
         assert user["name"] == "测试用户"
-        assert user["api_key"] == "sk-test-key-001"
-        assert user["enabled"] == 1
+        assert user["role"] == "user"
 
         # 列表
-        resp = client.get("/admin/api/users")
+        resp = client.get("/admin/api/users", headers=admin_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert data["pagination"]["total"] == 1
         assert data["items"][0]["name"] == "测试用户"
 
         # 按名称搜索
-        resp = client.get("/admin/api/users?q=测试")
+        resp = client.get("/admin/api/users?q=测试", headers=admin_headers)
         assert resp.json()["pagination"]["total"] == 1
-        resp = client.get("/admin/api/users?q=不存在")
+        resp = client.get("/admin/api/users?q=不存在", headers=admin_headers)
         assert resp.json()["pagination"]["total"] == 0
 
         # 获取详情
-        resp = client.get(f"/admin/api/users/{uid}")
+        resp = client.get(f"/admin/api/users/{uid}", headers=admin_headers)
         assert resp.status_code == 200
-        assert resp.json()["api_key"] == "sk-test-key-001"
+        assert resp.json()["name"] == "测试用户"
 
         # 更新
-        resp = client.put(f"/admin/api/users/{uid}", json={"name": "改名了", "enabled": False})
+        resp = client.put(f"/admin/api/users/{uid}", json={"name": "改名了"}, headers=admin_headers)
         assert resp.status_code == 200
         assert resp.json()["name"] == "改名了"
-        assert resp.json()["enabled"] == 0
 
         # 删除
-        resp = client.delete(f"/admin/api/users/{uid}")
+        resp = client.delete(f"/admin/api/users/{uid}", headers=admin_headers)
         assert resp.status_code == 200
         assert resp.json() == {"ok": True}
 
         # 确认已删除
-        resp = client.get(f"/admin/api/users/{uid}")
+        resp = client.get(f"/admin/api/users/{uid}", headers=admin_headers)
         assert resp.status_code == 404
 
 
-def test_user_create_auto_generates_key(tmp_path):
-    """不传 api_key 时自动生成 sk- 前缀密钥"""
+def test_user_create_requires_password(tmp_path):
+    """创建用户时必须提供密码"""
     app = create_app(
         build_settings(tmp_path),
         downstream_transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True})),
     )
 
     with TestClient(app) as client:
-        resp = client.post("/admin/api/users", json={"name": "自动生成Key"})
-        assert resp.status_code == 200
-        assert resp.json()["api_key"].startswith("sk-")
-        assert len(resp.json()["api_key"]) > 10
+        admin_headers = login_admin(client)
+        resp = client.post("/admin/api/users", json={"name": "缺少密码"}, headers=admin_headers)
+        assert resp.status_code == 422
 
 
 def test_user_create_requires_name(tmp_path):
@@ -259,7 +305,8 @@ def test_user_create_requires_name(tmp_path):
     )
 
     with TestClient(app) as client:
-        resp = client.post("/admin/api/users", json={"name": ""})
+        admin_headers = login_admin(client)
+        resp = client.post("/admin/api/users", json={"name": "", "password": "abc123456"}, headers=admin_headers)
         assert resp.status_code == 422
 
 
@@ -276,13 +323,15 @@ def test_proxy_uses_user_downstream_override(tmp_path):
     app = create_app(build_settings(tmp_path), downstream_transport=transport)
 
     with TestClient(app) as client:
+        admin_headers = login_admin(client)
         # 先创建一个带自定义 downstream 的用户
         resp = client.post("/admin/api/users", json={
             "name": "custom-user",
+            "password": "custom-password",
             "api_key": "sk-custom-user-key",
             "downstream_url": "https://custom.api.test",
             "downstream_apikey": "sk-real-provider-key",
-        })
+        }, headers=admin_headers)
         assert resp.status_code == 200
 
         # 使用该用户的 API Key 发起代理请求
@@ -308,6 +357,7 @@ def test_provider_crud_lifecycle(tmp_path):
     )
 
     with TestClient(app) as client:
+        admin_headers = login_admin(client)
         # 创建 provider
         resp = client.post("/admin/api/providers", json={
             "name": "OpenAI",
@@ -315,7 +365,7 @@ def test_provider_crud_lifecycle(tmp_path):
             "downstream_url": "https://api.openai.com",
             "input_price": 2.5,
             "output_price": 10.0,
-        })
+        }, headers=admin_headers)
         assert resp.status_code == 200
         prov = resp.json()
         pid = prov["id"]
@@ -323,84 +373,64 @@ def test_provider_crud_lifecycle(tmp_path):
         assert prov["prefix_path"] == "openai"
 
         # 列表
-        resp = client.get("/admin/api/providers")
+        resp = client.get("/admin/api/providers", headers=admin_headers)
         assert resp.status_code == 200
         items = resp.json()["items"]
         assert len(items) == 1
         assert items[0]["name"] == "OpenAI"
 
         # 获取详情
-        resp = client.get(f"/admin/api/providers/{pid}")
+        resp = client.get(f"/admin/api/providers/{pid}", headers=admin_headers)
         assert resp.status_code == 200
         assert resp.json()["input_price"] == 2.5
 
         # 更新
-        resp = client.put(f"/admin/api/providers/{pid}", json={"name": "OpenAI Updated", "output_price": 15.0})
+        resp = client.put(f"/admin/api/providers/{pid}", json={"name": "OpenAI Updated", "output_price": 15.0}, headers=admin_headers)
         assert resp.status_code == 200
         assert resp.json()["name"] == "OpenAI Updated"
         assert resp.json()["output_price"] == 15.0
 
         # 删除
-        resp = client.delete(f"/admin/api/providers/{pid}")
+        resp = client.delete(f"/admin/api/providers/{pid}", headers=admin_headers)
         assert resp.status_code == 200
         assert resp.json() == {"ok": True}
 
         # 确认已删除
-        resp = client.get(f"/admin/api/providers/{pid}")
+        resp = client.get(f"/admin/api/providers/{pid}", headers=admin_headers)
         assert resp.status_code == 404
 
 
-# ════════════════ Auth & Permissions ════════════════
-
-
-def build_settings_with_auth(tmp_path):
-    return Settings(
-        app_name="test-app",
-        downstream_url="https://provider.test",
-        log_dir=tmp_path,
-        jsonl_path=tmp_path / "logs.jsonl",
-        sqlite_path=tmp_path / "logs.db",
-        request_timeout_seconds=30.0,
-        admin_title="Test Console",
-        provider_routes={},
-        queue_maxsize=16,
-        admin_page_size_default=20,
-        admin_page_size_max=100,
-        default_provider_name="provider.test",
-        admin_api_key="sk-master-admin",
-    )
-
-
 def test_auth_required_when_admin_key_set(tmp_path):
-    """设置 ADMIN_API_KEY 后，无认证请求返回 401"""
+    """系统必须先登录才能访问后台接口"""
     app = create_app(
-        build_settings_with_auth(tmp_path),
+        build_settings(tmp_path),
         downstream_transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True})),
     )
 
     with TestClient(app) as client:
-        # 无 key 应 401
+        # 无 session 应 401
         resp = client.get("/admin/api/overview")
         assert resp.status_code == 401
 
-        # 错误 key 也应 401
-        resp = client.get("/admin/api/overview", headers={"X-Api-Key": "wrong-key"})
+        # 错误 session 也应 401
+        resp = client.get("/admin/api/overview", headers={"X-Session-Token": "wrong-token"})
         assert resp.status_code == 401
 
-        # 正确 admin key 应 200
-        resp = client.get("/admin/api/overview", headers={"X-Api-Key": "sk-master-admin"})
+        # 正确账号密码登录后应 200
+        admin_headers = login_admin(client)
+        resp = client.get("/admin/api/overview", headers=admin_headers)
         assert resp.status_code == 200
 
 
 def test_user_role_sees_filtered_data(tmp_path):
     """user 角色只能看到自己有权限的 provider 的数据"""
     app = create_app(
-        build_settings_with_auth(tmp_path),
+        build_settings(tmp_path),
         downstream_transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True})),
     )
-    admin_hdr = {"X-Api-Key": "sk-master-admin"}
 
     with TestClient(app) as client:
+        admin_hdr = login_admin(client)
         # 创建 provider
         resp = client.post("/admin/api/providers", json={
             "name": "TestProv",
@@ -413,38 +443,38 @@ def test_user_role_sees_filtered_data(tmp_path):
         # 创建 user 角色用户并绑定 provider
         resp = client.post("/admin/api/users", json={
             "name": "viewer",
-            "api_key": "sk-viewer-key",
-            "role": "user",
+            "password": "viewer-password",
             "provider_ids": [prov_id],
         }, headers=admin_hdr)
         assert resp.status_code == 200
+        user_hdr = login_user(client, "viewer", "viewer-password")
 
         # user 角色不能管理 providers
-        resp = client.get("/admin/api/providers", headers={"X-Api-Key": "sk-viewer-key"})
+        resp = client.get("/admin/api/providers", headers=user_hdr)
         assert resp.status_code == 403
 
         # user 角色不能管理 users
-        resp = client.get("/admin/api/users", headers={"X-Api-Key": "sk-viewer-key"})
+        resp = client.get("/admin/api/users", headers=user_hdr)
         assert resp.status_code == 403
 
         # user 可以查看 overview 和 logs
-        resp = client.get("/admin/api/overview", headers={"X-Api-Key": "sk-viewer-key"})
+        resp = client.get("/admin/api/overview", headers=user_hdr)
         assert resp.status_code == 200
 
-        resp = client.get("/admin/api/logs", headers={"X-Api-Key": "sk-viewer-key"})
+        resp = client.get("/admin/api/logs", headers=user_hdr)
         assert resp.status_code == 200
 
 
 def test_session_returns_user_info(tmp_path):
     """session 端点返回用户信息和角色"""
     app = create_app(
-        build_settings_with_auth(tmp_path),
+        build_settings(tmp_path),
         downstream_transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True})),
     )
 
     with TestClient(app) as client:
-        # admin key
-        resp = client.get("/admin/api/session", headers={"X-Api-Key": "sk-master-admin"})
+        admin_headers = login_admin(client)
+        resp = client.get("/admin/api/session", headers=admin_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert data["user"]["role"] == "admin"
@@ -457,17 +487,16 @@ def test_session_returns_user_info(tmp_path):
 def test_password_login_flow(tmp_path):
     """用户名+密码登录流程"""
     app = create_app(
-        build_settings_with_auth(tmp_path),
+        build_settings(tmp_path),
         downstream_transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True})),
     )
-    admin_hdr = {"X-Api-Key": "sk-master-admin"}
 
     with TestClient(app) as client:
+        admin_hdr = login_admin(client)
         # 创建带密码的用户
         resp = client.post("/admin/api/users", json={
             "name": "testuser",
             "password": "mypassword123",
-            "role": "user",
         }, headers=admin_hdr)
         assert resp.status_code == 200
         user = resp.json()
@@ -482,10 +511,10 @@ def test_password_login_flow(tmp_path):
         data = resp.json()
         assert data["user"]["name"] == "testuser"
         assert data["user"]["role"] == "user"
-        assert "api_key" in data  # 返回 api_key 用于后续请求
+        assert "session_token" in data
 
-        # 用返回的 api_key 访问 session
-        resp = client.get("/admin/api/session", headers={"X-Api-Key": data["api_key"]})
+        # 用返回的 session token 访问 session
+        resp = client.get("/admin/api/session", headers={"X-Session-Token": data["session_token"]})
         assert resp.status_code == 200
         assert resp.json()["user"]["name"] == "testuser"
 

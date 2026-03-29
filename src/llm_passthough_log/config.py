@@ -29,13 +29,18 @@ class Settings:
     admin_page_size_default: int
     admin_page_size_max: int
     default_provider_name: str
-    admin_api_key: Optional[str]
+    admin_username: str
+    admin_password: str
 
     @classmethod
     def from_env(cls, base_dir: Optional[Path] = None) -> "Settings":
         resolved_base_dir = (base_dir or Path.cwd()).resolve()
         log_dir = _resolve_path(os.getenv("LOG_DIR", "data"), resolved_base_dir)
         downstream_url = os.getenv("DOWNSTREAM_URL", "https://api.openai.com").rstrip("/")
+        admin_username = os.getenv("ADMIN_USERNAME", "").strip()
+        admin_password = os.getenv("ADMIN_PASSWORD", "").strip()
+        if not admin_username or not admin_password:
+            raise ValueError("ADMIN_USERNAME and ADMIN_PASSWORD must be set")
         routes_raw = os.getenv("PROVIDER_ROUTES_JSON", "").strip()
         provider_routes: Dict[str, str] = {}
         if routes_raw:
@@ -59,7 +64,8 @@ class Settings:
             admin_page_size_default=int(os.getenv("ADMIN_PAGE_SIZE_DEFAULT", "20")),
             admin_page_size_max=int(os.getenv("ADMIN_PAGE_SIZE_MAX", "100")),
             default_provider_name=provider_name,
-            admin_api_key=os.getenv("ADMIN_API_KEY") or None,
+            admin_username=admin_username,
+            admin_password=admin_password,
         )
 
     def resolve_target(self, path: str) -> Tuple[str, str, str]:

@@ -4,8 +4,10 @@
 
 - 原样转发任意 HTTP 请求到下游 LLM Provider
 - 完整记录请求、响应、SSE 流式返回、错误信息
+- 管理后台强制账号密码登录，管理员账号仅可通过 `.env` 指定
 - JSONL 原始日志落盘
 - SQLite 索引，支持管理后台检索与统计
+- 自动为流式聊天请求补充 `stream_options.include_usage=true`，恢复 token 用量可视化
 - 基于 uv 的 Python 项目管理
 
 ## 运行
@@ -28,8 +30,22 @@ LOG_DIR=./data
 LOG_QUEUE_MAXSIZE=5000
 REQUEST_TIMEOUT_SECONDS=300
 ADMIN_TITLE="LLM 透明代理控制台"
+ADMIN_USERNAME="admin"
+ADMIN_PASSWORD="change-me"
 PROVIDER_ROUTES_JSON='{"openai":"https://api.openai.com","claude":"https://api.anthropic.com"}'
 ```
+
+说明：
+
+- 管理后台必须先登录后才能使用
+- `ADMIN_USERNAME` / `ADMIN_PASSWORD` 必填，且管理员只能通过 `.env` 手动维护
+- web 管理台仅允许 admin 创建、编辑、删除普通用户
+- 普通用户通过账号密码登录后，只能查看自己被授权的 provider 数据
+
+## Token 用量可视化
+
+- 对于流式请求，代理会自动补齐 `stream_options.include_usage=true`，便于记录 provider 返回的官方 token 用量
+- 对于历史日志或 provider 未返回 `usage` 的场景，详情页会显示一个估算版 token 面板，提供 prompt 长度和输出长度参考，方便快速做 prompt 优化
 
 当配置了 `PROVIDER_ROUTES_JSON` 时，可通过前缀路由到不同 Provider：
 

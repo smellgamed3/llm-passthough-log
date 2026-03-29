@@ -24,6 +24,7 @@ data/
 # 系统文件
 .DS_Store
 Thumbs.db
+*.bak
 
 # pytest
 .pytest_cache/
