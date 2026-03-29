@@ -103,6 +103,247 @@ def extract_msg_count(request_body: Any) -> int:
     return 0
 
 
+# ── Token estimation & breakdown analysis ────────────────────────────────────
+
+def _estimate_token_count(text: str) -> int:
+    """Estimate token count using CJK 0.7t/char + EN 1.3t/word heuristic."""
+    if not text:
+        return 0
+    s = str(text)
+    cjk_chars = len(re.findall(r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]", s))
+    cjk_punct = len(re.findall(r"[\u3000-\u303f\uff01-\uff60\ufe30-\ufe4f\u2018-\u201f\u2026\u2014]", s))
+    en_words = re.findall(r"[a-zA-Z]+", s)
+    en_letters = sum(len(w) for w in en_words)
+    digit_seqs = re.findall(r"\d+", s)
+    digit_chars = sum(len(d) for d in digit_seqs)
+    ws_chars = len(re.findall(r"\s", s))
+    other_chars = max(0, len(s) - cjk_chars - cjk_punct - en_letters - digit_chars - ws_chars)
+
+    tokens = (
+        cjk_chars * 0.7
+        + cjk_punct * 1.0
+        + len(en_words) * 1.3
+        + digit_chars / 3.3
+        + ws_chars * 0.15
+        + other_chars * 1.0
+    )
+    return max(1, round(tokens))
+
+
+def _collect_content_text(value: Any) -> str:
+    """Recursively extract text from various content formats."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(_collect_content_text(item) for item in value)
+    if isinstance(value, dict):
+        if isinstance(value.get("text"), str):
+            return value["text"]
+        if isinstance(value.get("content"), str):
+            return value["content"]
+        if isinstance(value.get("content"), list):
+            return "\n".join(_collect_content_text(p) for p in value["content"])
+        return "\n".join(_collect_content_text(v) for v in value.values())
+    return str(value)
+
+
+def _parse_sse_response(raw: str) -> Optional[Dict[str, Any]]:
+    """Extract response content from SSE stream text."""
+    reasoning = ""
+    content = ""
+    tool_calls: List[Dict[str, Any]] = []
+    usage = None
+    for ln in raw.split("\n"):
+        if not ln.startswith("data: "):
+            continue
+        payload = ln[6:].strip()
+        if payload == "[DONE]":
+            continue
+        try:
+            c = json.loads(payload)
+            if c.get("usage"):
+                usage = c["usage"]
+            for ch in c.get("choices", []):
+                d = ch.get("delta", {})
+                if d.get("reasoning_content"):
+                    reasoning += d["reasoning_content"]
+                if d.get("content"):
+                    content += d["content"]
+                if d.get("tool_calls"):
+                    for tc in d["tool_calls"]:
+                        idx = tc.get("index", len(tool_calls))
+                        while len(tool_calls) <= idx:
+                            tool_calls.append({"function": {"name": "", "arguments": ""}})
+                        if tc.get("function"):
+                            if tc["function"].get("name"):
+                                tool_calls[idx]["function"]["name"] += tc["function"]["name"]
+                            if tc["function"].get("arguments"):
+                                tool_calls[idx]["function"]["arguments"] += tc["function"]["arguments"]
+        except Exception:
+            pass
+    return {
+        "reasoning": reasoning,
+        "content": content,
+        "tool_calls": tool_calls if tool_calls else None,
+        "usage": usage,
+    }
+
+
+def analyze_token_breakdown(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Analyze token breakdown from request/response.
+
+    Returns a dict with:
+      - prompt_breakdown: list of {role, tokens, chars, count} for each message role
+      - completion_breakdown: list of {category, tokens, chars} for completion parts
+      - has_real_usage: whether API returned actual usage data
+      - usage: the real usage object if available
+    """
+    request_body = entry.get("request_body")
+    response_body = entry.get("response_body")
+    if not isinstance(request_body, dict):
+        return None
+
+    messages = request_body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return None
+
+    # ── Prompt breakdown by role ──
+    role_map: Dict[str, Dict[str, Any]] = {}
+
+    def add_role(role: str, text: str, count: int = 1) -> None:
+        if not text:
+            return
+        if role not in role_map:
+            role_map[role] = {"text": "", "chars": 0, "tokens": 0, "count": 0}
+        role_map[role]["text"] += text + "\n"
+        role_map[role]["count"] += count
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role", "user")).lower()
+        text = _collect_content_text(msg.get("content"))
+        # tool_calls in assistant messages → count separately
+        if isinstance(msg.get("tool_calls"), list):
+            tc_text = "\n".join(
+                (tc.get("function", {}).get("name", "") + " " + tc.get("function", {}).get("arguments", ""))
+                for tc in msg["tool_calls"]
+                if isinstance(tc, dict)
+            )
+            add_role("assistant", tc_text)
+        add_role(role, text)
+
+    # tools / functions schema
+    if isinstance(request_body.get("tools"), list):
+        schema_text = json.dumps(request_body["tools"], ensure_ascii=False)
+        add_role("tools_schema", schema_text)
+    elif isinstance(request_body.get("functions"), list):
+        schema_text = json.dumps(request_body["functions"], ensure_ascii=False)
+        add_role("tools_schema", schema_text)
+
+    # Calculate tokens per role
+    prompt_breakdown = []
+    total_prompt_est = 0
+    for role, info in role_map.items():
+        info["chars"] = len(info["text"])
+        info["tokens"] = _estimate_token_count(info["text"])
+        total_prompt_est += info["tokens"]
+        prompt_breakdown.append({
+            "role": role,
+            "tokens": info["tokens"],
+            "chars": info["chars"],
+            "count": info["count"],
+        })
+
+    # Sort descending by tokens
+    prompt_breakdown.sort(key=lambda x: x["tokens"], reverse=True)
+
+    # ── Response / completion breakdown ──
+    resp_info = None
+    if isinstance(response_body, dict):
+        ch = (response_body.get("choices") or [None])[0]
+        if isinstance(ch, dict):
+            m = ch.get("message", {})
+            resp_info = {
+                "reasoning": m.get("reasoning_content", ""),
+                "content": m.get("content", ""),
+                "tool_calls": m.get("tool_calls"),
+                "usage": response_body.get("usage"),
+            }
+    elif isinstance(response_body, str):
+        resp_info = _parse_sse_response(response_body)
+
+    completion_breakdown = []
+    if resp_info:
+        if resp_info.get("content"):
+            txt = resp_info["content"]
+            completion_breakdown.append({
+                "category": "text_output",
+                "label": "文本输出",
+                "tokens": _estimate_token_count(txt),
+                "chars": len(txt),
+            })
+        if resp_info.get("reasoning"):
+            txt = resp_info["reasoning"]
+            completion_breakdown.append({
+                "category": "reasoning",
+                "label": "推理",
+                "tokens": _estimate_token_count(txt),
+                "chars": len(txt),
+            })
+        if resp_info.get("tool_calls"):
+            tc_text = "\n".join(
+                (tc.get("function", {}).get("name", "") + " " + tc.get("function", {}).get("arguments", ""))
+                for tc in resp_info["tool_calls"]
+                if isinstance(tc, dict)
+            )
+            if tc_text.strip():
+                completion_breakdown.append({
+                    "category": "tool_calls",
+                    "label": "工具调用",
+                    "tokens": _estimate_token_count(tc_text),
+                    "chars": len(tc_text),
+                })
+
+    completion_breakdown.sort(key=lambda x: x["tokens"], reverse=True)
+
+    # ── Extract real usage ──
+    real_usage = None
+    if resp_info and isinstance(resp_info.get("usage"), dict):
+        real_usage = resp_info["usage"]
+    elif isinstance(response_body, dict) and isinstance(response_body.get("usage"), dict):
+        real_usage = response_body["usage"]
+
+    # If we have real usage, scale estimated breakdown proportionally
+    if real_usage and total_prompt_est > 0:
+        real_prompt = real_usage.get("prompt_tokens", 0)
+        if real_prompt > 0:
+            for item in prompt_breakdown:
+                item["tokens"] = round(item["tokens"] / total_prompt_est * real_prompt)
+            # Mark as scaled
+            for item in prompt_breakdown:
+                item["scaled"] = True
+
+    if real_usage and completion_breakdown:
+        real_compl = real_usage.get("completion_tokens", 0)
+        est_compl_total = sum(c["tokens"] for c in completion_breakdown) or 1
+        if real_compl > 0:
+            for item in completion_breakdown:
+                item["tokens"] = round(item["tokens"] / est_compl_total * real_compl)
+                item["scaled"] = True
+
+    if not prompt_breakdown and not completion_breakdown:
+        return None
+
+    return {
+        "prompt_breakdown": prompt_breakdown,
+        "completion_breakdown": completion_breakdown,
+        "has_real_usage": real_usage is not None,
+    }
+
+
 def generate_api_key() -> str:
     """Generate a cryptographically random sk-prefixed API key."""
     return "sk-" + secrets.token_urlsafe(32)
@@ -372,6 +613,10 @@ class LogStore:
         mc = extract_msg_count(request_body)
         entry["conv_fingerprint"] = conv_fp
         entry["msg_count"] = mc
+        # Token breakdown analysis
+        token_analysis = analyze_token_breakdown(entry)
+        if token_analysis:
+            entry["token_analysis"] = token_analysis
         line = dumps_json(entry)
 
         with self._jsonl_path.open("a", encoding="utf-8") as handle:
@@ -557,6 +802,36 @@ class LogStore:
         if row is None:
             return None
         return json.loads(row[0])
+
+    # ── Batch reanalysis ─────────────────────────────────────────────────
+
+    async def reanalyze_token_breakdowns(self) -> Dict[str, int]:
+        return await asyncio.to_thread(self._reanalyze_token_breakdowns_sync)
+
+    def _reanalyze_token_breakdowns_sync(self) -> Dict[str, int]:
+        """Re-run analyze_token_breakdown on all stored entries and update."""
+        total = 0
+        updated = 0
+        with sqlite3.connect(self._sqlite_path) as conn:
+            rows = conn.execute("SELECT id, entry_json FROM logs").fetchall()
+            total = len(rows)
+            for row_id, entry_json_str in rows:
+                entry = json.loads(entry_json_str)
+                new_analysis = analyze_token_breakdown(entry)
+                old_analysis = entry.get("token_analysis")
+                if new_analysis != old_analysis:
+                    if new_analysis:
+                        entry["token_analysis"] = new_analysis
+                    elif "token_analysis" in entry:
+                        del entry["token_analysis"]
+                    new_json = dumps_json(entry)
+                    conn.execute(
+                        "UPDATE logs SET entry_json = ? WHERE id = ?",
+                        (new_json, row_id),
+                    )
+                    updated += 1
+            conn.commit()
+        return {"total": total, "updated": updated}
 
     # ── Conversation timeline ────────────────────────────────────────────
 

@@ -538,6 +538,15 @@ def create_app(
             raise HTTPException(status_code=404, detail="user not found")
         return {"ok": True}
 
+    # ── Token reanalysis API ─────────────────────────────────────────────
+
+    @app.post("/admin/api/reanalyze", include_in_schema=False)
+    async def admin_reanalyze(request: Request) -> Dict[str, Any]:
+        user = await _resolve_user(request)
+        _require_admin(user)
+        result = await runtime.log_store.reanalyze_token_breakdowns()
+        return result
+
     # ── Provider management API ──────────────────────────────────────────
 
     @app.get("/admin/api/providers", include_in_schema=False)

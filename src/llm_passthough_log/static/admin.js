@@ -452,6 +452,21 @@ function renderChips(id, items, fn) {
 
 document.getElementById("refreshOverview").addEventListener("click", loadOverview);
 
+document.getElementById("btnReanalyze").addEventListener("click", async () => {
+  const btn = document.getElementById("btnReanalyze");
+  if (!confirm("将使用最新规则重新分析所有记录的 Token 用量，确定继续？")) return;
+  btn.disabled = true;
+  btn.textContent = "分析中…";
+  try {
+    const res = await fetchJSON("/admin/api/reanalyze", { method: "POST" });
+    btn.textContent = `完成: ${res.updated}/${res.total} 条已更新`;
+    setTimeout(() => { btn.textContent = "重新分析 Token"; btn.disabled = false; }, 4000);
+  } catch (e) {
+    btn.textContent = "分析失败";
+    setTimeout(() => { btn.textContent = "重新分析 Token"; btn.disabled = false; }, 3000);
+  }
+});
+
 /* ── Trace 列表 ───────────────────────────────────── */
 
 async function loadLogs() {
@@ -818,19 +833,49 @@ function renderTokenPanel(usage, entry, resp) {
   const prompt = effectiveUsage.prompt_tokens ?? 0;
   const compl = effectiveUsage.completion_tokens ?? 0;
   const total = effectiveUsage.total_tokens || (prompt + compl);
-  const reasoning = effectiveUsage.completion_tokens_details?.reasoning_tokens ?? 0;
-  const cached = effectiveUsage.prompt_tokens_details?.cached_tokens ?? 0;
-  const actualPrompt = prompt - cached;
-  const actualCompl = compl - reasoning;
-  const breakdown = effectiveUsage.role_breakdown; // may be undefined for real usage
+  const promptDetails = effectiveUsage.prompt_tokens_details || {};
+  const complDetails = effectiveUsage.completion_tokens_details || {};
+  const reasoning = complDetails.reasoning_tokens ?? 0;
+  const cached = promptDetails.cached_tokens ?? 0;
+  const audioPrompt = promptDetails.audio_tokens ?? 0;
+  const audioCompl = complDetails.audio_tokens ?? 0;
+  const acceptedPrediction = complDetails.accepted_prediction_tokens ?? 0;
+  const rejectedPrediction = complDetails.rejected_prediction_tokens ?? 0;
+  const actualPrompt = prompt - cached - audioPrompt;
+  const actualCompl = compl - reasoning - audioCompl - acceptedPrediction - rejectedPrediction;
 
-  // ── Main bar (prompt / completion / cached / reasoning) ──
+  // ── Get breakdown: prefer backend token_analysis, fallback to frontend estimation ──
+  const analysis = entry?.token_analysis;
+  let breakdown = null;
+  let complBreakdown = null;
+
+  if (analysis) {
+    breakdown = analysis.prompt_breakdown;
+    complBreakdown = analysis.completion_breakdown;
+  } else {
+    breakdown = effectiveUsage.role_breakdown;
+    if (!breakdown && !effectiveUsage.estimated) {
+      const estimated = estimateUsage(entry, resp);
+      if (estimated && estimated.role_breakdown && estimated.role_breakdown.length > 0) {
+        const estTotal = estimated.role_breakdown.reduce((s, r) => s + r.tokens, 0) || 1;
+        breakdown = estimated.role_breakdown.map(r => ({
+          role: r.role, tokens: Math.round(r.tokens / estTotal * prompt), chars: r.chars, scaled: true,
+        }));
+      }
+    }
+  }
+
+  // ── Main bar ──
   const segs = [];
   if (total > 0) {
     if (cached > 0) segs.push({ c: "cached", p: cached/total*100, l: `缓存 ${cached}` });
     if (actualPrompt > 0) segs.push({ c: "prompt", p: actualPrompt/total*100, l: `Prompt ${actualPrompt}` });
+    if (audioPrompt > 0) segs.push({ c: "audio-prompt", p: audioPrompt/total*100, l: `音频输入 ${audioPrompt}` });
     if (reasoning > 0) segs.push({ c: "reasoning", p: reasoning/total*100, l: `推理 ${reasoning}` });
     if (actualCompl > 0) segs.push({ c: "completion", p: actualCompl/total*100, l: `输出 ${actualCompl}` });
+    if (audioCompl > 0) segs.push({ c: "audio-compl", p: audioCompl/total*100, l: `音频输出 ${audioCompl}` });
+    if (acceptedPrediction > 0) segs.push({ c: "accepted-pred", p: acceptedPrediction/total*100, l: `预测命中 ${acceptedPrediction}` });
+    if (rejectedPrediction > 0) segs.push({ c: "rejected-pred", p: rejectedPrediction/total*100, l: `预测未命中 ${rejectedPrediction}` });
   }
   const bar = segs.map(s =>
     `<div class="tbar-seg ${s.c}" style="width:${Math.max(s.p,2).toFixed(1)}%" title="${s.l}">${s.p > 12 ? s.l : ""}</div>`
@@ -840,19 +885,23 @@ function renderTokenPanel(usage, entry, resp) {
   const items = [];
   items.push(tsItem("prompt", "Prompt", prompt));
   if (cached > 0) items.push(tsItem("cached", "缓存命中", cached));
+  if (audioPrompt > 0) items.push(tsItem("audio-prompt", "音频输入", audioPrompt));
   items.push(tsItem("completion", "Completion", compl));
   if (reasoning > 0) items.push(tsItem("reasoning", "推理", reasoning));
+  if (audioCompl > 0) items.push(tsItem("audio-compl", "音频输出", audioCompl));
+  if (acceptedPrediction > 0) items.push(tsItem("accepted-pred", "预测命中", acceptedPrediction));
+  if (rejectedPrediction > 0) items.push(tsItem("rejected-pred", "预测未命中", rejectedPrediction));
   items.push(`<div class="ts-item"><strong style="font-size:14px">总计 ${total}</strong></div>`);
   if (cached > 0 && prompt > 0) {
     items.push(`<div class="ts-item">缓存率<strong>${((cached/prompt)*100).toFixed(1)}%</strong></div>`);
   }
 
-  // ── Role breakdown bar + table (estimated or real w/ breakdown) ──
+  // ── Prompt breakdown ──
   let roleHtml = "";
   if (breakdown && breakdown.length > 0) {
-    // sort by tokens descending
     const sorted = [...breakdown].sort((a, b) => b.tokens - a.tokens);
     const roleTotal = sorted.reduce((s, r) => s + r.tokens, 0) || 1;
+    const isScaled = sorted.some(r => r.scaled);
     const roleBar = sorted.map(r => {
       const m = roleMeta(r.role);
       const pct = r.tokens / roleTotal * 100;
@@ -861,16 +910,58 @@ function renderTokenPanel(usage, entry, resp) {
     const roleRows = sorted.map(r => {
       const m = roleMeta(r.role);
       const pct = (r.tokens / roleTotal * 100).toFixed(1);
-      return `<div class="ts-item"><span class="ts-dot ${m.cls}"></span>${m.label}<strong>${r.tokens}</strong><span class="ts-pct">${pct}%</span><span class="ts-chars">${r.chars} 字符</span></div>`;
+      const charsInfo = r.chars != null ? `<span class="ts-chars">${r.chars} 字符</span>` : "";
+      const countInfo = r.count != null && r.count > 0 ? `<span class="ts-count">${r.count} 条</span>` : "";
+      return `<div class="ts-item"><span class="ts-dot ${m.cls}"></span>${m.label}<strong>${r.tokens}</strong><span class="ts-pct">${pct}%</span>${charsInfo}${countInfo}</div>`;
     }).join("");
-    roleHtml = `<div class="role-breakdown"><div class="role-breakdown-title">Prompt 构成明细</div><div class="token-bar">${roleBar}</div><div class="token-stats">${roleRows}</div></div>`;
+    const breakdownTitle = isScaled ? "Prompt 构成明细（按比例估算）" : "Prompt 构成明细";
+    roleHtml = `<div class="role-breakdown"><div class="role-breakdown-title">${breakdownTitle}</div><div class="token-bar">${roleBar}</div><div class="token-stats">${roleRows}</div></div>`;
+  }
+
+  // ── Completion breakdown ──
+  let complHtml = "";
+  if (complBreakdown && complBreakdown.length > 1) {
+    const sorted = [...complBreakdown].sort((a, b) => b.tokens - a.tokens);
+    const complTotal = sorted.reduce((s, r) => s + r.tokens, 0) || 1;
+    const clsMap = { text_output: "completion", reasoning: "reasoning", tool_calls: "tool-calls", audio: "audio-compl" };
+    const complBar = sorted.map(r => {
+      const cls = clsMap[r.category] || "completion";
+      const pct = r.tokens / complTotal * 100;
+      return `<div class="tbar-seg ${cls}" style="width:${Math.max(pct,2).toFixed(1)}%" title="${r.label} ${r.tokens}">${pct > 10 ? r.label + " " + r.tokens : ""}</div>`;
+    }).join("");
+    const complRows = sorted.map(r => {
+      const cls = clsMap[r.category] || "completion";
+      const pct = (r.tokens / complTotal * 100).toFixed(1);
+      const charsInfo = r.chars != null ? `<span class="ts-chars">${r.chars} 字符</span>` : "";
+      return `<div class="ts-item"><span class="ts-dot ${cls}"></span>${r.label}<strong>${r.tokens}</strong><span class="ts-pct">${pct}%</span>${charsInfo}</div>`;
+    }).join("");
+    complHtml = `<div class="role-breakdown"><div class="role-breakdown-title">Completion 构成明细</div><div class="token-bar">${complBar}</div><div class="token-stats">${complRows}</div></div>`;
+  } else if (compl > 0 && (reasoning > 0 || audioCompl > 0 || acceptedPrediction > 0 || rejectedPrediction > 0)) {
+    const complSegs = [];
+    const actualOutput = compl - reasoning - audioCompl - acceptedPrediction - rejectedPrediction;
+    if (actualOutput > 0) complSegs.push({ cls: "completion", tokens: actualOutput, label: "文本输出" });
+    if (reasoning > 0) complSegs.push({ cls: "reasoning", tokens: reasoning, label: "推理" });
+    if (audioCompl > 0) complSegs.push({ cls: "audio-compl", tokens: audioCompl, label: "音频输出" });
+    if (acceptedPrediction > 0) complSegs.push({ cls: "accepted-pred", tokens: acceptedPrediction, label: "预测命中" });
+    if (rejectedPrediction > 0) complSegs.push({ cls: "rejected-pred", tokens: rejectedPrediction, label: "预测未命中" });
+    const complTotal = complSegs.reduce((s, r) => s + r.tokens, 0) || 1;
+    const complBar = complSegs.map(r => {
+      const pct = r.tokens / complTotal * 100;
+      return `<div class="tbar-seg ${r.cls}" style="width:${Math.max(pct,2).toFixed(1)}%" title="${r.label} ${r.tokens}">${pct > 10 ? r.label + " " + r.tokens : ""}</div>`;
+    }).join("");
+    const complRows = complSegs.map(r => {
+      const pct = (r.tokens / complTotal * 100).toFixed(1);
+      return `<div class="ts-item"><span class="ts-dot ${r.cls}"></span>${r.label}<strong>${r.tokens}</strong><span class="ts-pct">${pct}%</span></div>`;
+    }).join("");
+    complHtml = `<div class="role-breakdown"><div class="role-breakdown-title">Completion 构成明细</div><div class="token-bar">${complBar}</div><div class="token-stats">${complRows}</div></div>`;
   }
 
   const note = effectiveUsage.estimated
     ? '<div class="token-note">当前记录未返回官方 usage，以上为基于 CJK 0.7t/字 + EN 1.3t/词 的近似估算；新流式请求已自动补齐 usage 回传。</div>'
     : "";
+  const scaleNote = (analysis && analysis.has_real_usage === false) ? '<div class="token-note">构成明细基于字符比例估算，总量为近似值。</div>' : "";
   const title = effectiveUsage.estimated ? "Token 用量（估算）" : "Token 用量";
-  return `<div class="token-panel"><h4>${title}</h4><div class="token-bar">${bar}</div><div class="token-stats">${items.join("")}</div>${roleHtml}${note}</div>`;
+  return `<div class="token-panel"><h4>${title}</h4><div class="token-bar">${bar}</div><div class="token-stats">${items.join("")}</div>${roleHtml}${complHtml}${note}${scaleNote}</div>`;
 }
 
 function tsItem(cls, label, val) {
