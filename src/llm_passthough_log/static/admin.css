@@ -592,6 +592,15 @@ body.role-admin .admin-only { display: revert; }
 .tbar-seg.completion { background: #f59e0b; }
 .tbar-seg.reasoning { background: #a78bfa; }
 
+/* Role breakdown colors */
+.tbar-seg.role-system { background: #ef4444; }
+.tbar-seg.role-user { background: #3b82f6; }
+.tbar-seg.role-assistant { background: #a78bfa; }
+.tbar-seg.role-tool { background: #f97316; }
+.tbar-seg.role-tools-schema { background: #14b8a6; }
+.tbar-seg.role-function { background: #ec4899; }
+.tbar-seg.role-other { background: #6b7280; }
+
 .token-stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
@@ -618,10 +627,42 @@ body.role-admin .admin-only { display: revert; }
 .ts-dot.completion { background: #f59e0b; }
 .ts-dot.reasoning { background: #a78bfa; }
 
+.ts-dot.role-system { background: #ef4444; }
+.ts-dot.role-user { background: #3b82f6; }
+.ts-dot.role-assistant { background: #a78bfa; }
+.ts-dot.role-tool { background: #f97316; }
+.ts-dot.role-tools-schema { background: #14b8a6; }
+.ts-dot.role-function { background: #ec4899; }
+.ts-dot.role-other { background: #6b7280; }
+
 .ts-item strong {
   margin-left: auto;
   font-variant-numeric: tabular-nums;
   color: var(--text);
+}
+.ts-pct {
+  font-size: 11px;
+  color: var(--text-secondary);
+  min-width: 40px;
+  text-align: right;
+}
+.ts-chars {
+  font-size: 11px;
+  color: var(--text-muted, #666);
+  min-width: 70px;
+  text-align: right;
+}
+
+.role-breakdown {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.role-breakdown-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
 }
 
 /* ── 消息线程 ─────────────────────────────────────── */

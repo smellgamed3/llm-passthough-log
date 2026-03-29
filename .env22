@@ -1,0 +1,20 @@
+# ============================
+# LLM 透明代理 — 环境变量配置
+# ============================
+
+APP_NAME="LLM Passthough Log"
+ADMIN_TITLE="LLM 透明代理控制台"
+
+DOWNSTREAM_URL="https://llm.snow13.top:30006"
+PROVIDER_ROUTES_JSON=""
+
+LOG_DIR="data"
+REQUEST_TIMEOUT_SECONDS=300
+LOG_QUEUE_MAXSIZE=5000
+
+ADMIN_PAGE_SIZE_DEFAULT=20
+ADMIN_PAGE_SIZE_MAX=100
+
+HOST="0.0.0.0"
+PORT=8000
+WORKERS=1

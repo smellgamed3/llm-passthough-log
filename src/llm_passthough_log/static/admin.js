@@ -120,32 +120,67 @@ function collectContentText(value) {
 
 function estimateUsage(entry, resp) {
   const requestBody = entry?.request_body;
-  const promptParts = [];
+  // Per-role breakdown: { role: { text, chars, tokens } }
+  const roleMap = {};
+  const addRole = (role, text) => {
+    if (!text) return;
+    if (!roleMap[role]) roleMap[role] = { text: "", chars: 0, tokens: 0 };
+    roleMap[role].text += text + "\n";
+  };
+
   if (requestBody && typeof requestBody === "object") {
-    if (typeof requestBody.prompt === "string") promptParts.push(requestBody.prompt);
-    if (typeof requestBody.input === "string") promptParts.push(requestBody.input);
+    if (typeof requestBody.prompt === "string") addRole("user", requestBody.prompt);
+    if (typeof requestBody.input === "string") addRole("user", requestBody.input);
     if (Array.isArray(requestBody.messages)) {
-      requestBody.messages.forEach(msg => promptParts.push(collectContentText(msg?.content)));
+      requestBody.messages.forEach(msg => {
+        const role = (msg?.role || "user").toLowerCase();
+        const text = collectContentText(msg?.content);
+        // tool_calls inside assistant message → count as assistant
+        if (Array.isArray(msg?.tool_calls)) {
+          const tcText = msg.tool_calls.map(tc => (tc?.function?.name || "") + " " + (tc?.function?.arguments || "")).join("\n");
+          addRole("assistant", tcText);
+        }
+        addRole(role, text);
+      });
+    }
+    // tools / functions schema definitions
+    if (Array.isArray(requestBody.tools)) {
+      const schemaText = JSON.stringify(requestBody.tools);
+      addRole("tools_schema", schemaText);
+    } else if (Array.isArray(requestBody.functions)) {
+      const schemaText = JSON.stringify(requestBody.functions);
+      addRole("tools_schema", schemaText);
     }
   }
+  // Response parts
   const responseParts = [];
   if (resp?.content) responseParts.push(resp.content);
   if (resp?.reasoning) responseParts.push(resp.reasoning);
   if (Array.isArray(resp?.toolCalls)) {
-    resp.toolCalls.forEach(tc => responseParts.push(tc?.function?.arguments || ""));
+    resp.toolCalls.forEach(tc => responseParts.push((tc?.function?.name || "") + " " + (tc?.function?.arguments || "")));
   }
-  const promptText = promptParts.filter(Boolean).join("\n");
   const completionText = responseParts.filter(Boolean).join("\n");
-  if (!promptText && !completionText) return null;
-  const promptTokens = estimateTokenCount(promptText);
+
+  // Calculate tokens per role
+  let promptTokens = 0;
+  const roleBreakdown = [];
+  for (const [role, info] of Object.entries(roleMap)) {
+    info.chars = info.text.length;
+    info.tokens = estimateTokenCount(info.text);
+    promptTokens += info.tokens;
+    roleBreakdown.push({ role, tokens: info.tokens, chars: info.chars });
+  }
   const completionTokens = estimateTokenCount(completionText);
+  if (!promptTokens && !completionTokens) return null;
+
   return {
     prompt_tokens: promptTokens,
     completion_tokens: completionTokens,
     total_tokens: promptTokens + completionTokens,
     estimated: true,
-    prompt_chars: promptText.length,
+    prompt_chars: roleBreakdown.reduce((s, r) => s + r.chars, 0),
     completion_chars: completionText.length,
+    role_breakdown: roleBreakdown,
   };
 }
 
@@ -622,6 +657,19 @@ function renderDetail(entry) {
 
 /* ── Token 面板 ───────────────────────────────────── */
 
+/* role → display label / CSS class */
+const ROLE_META = {
+  system:       { label: "System",     cls: "role-system" },
+  user:         { label: "User",       cls: "role-user" },
+  assistant:    { label: "Assistant",   cls: "role-assistant" },
+  tool:         { label: "Tool 结果",  cls: "role-tool" },
+  tools_schema: { label: "Tools 定义", cls: "role-tools-schema" },
+  function:     { label: "Function",   cls: "role-function" },
+};
+function roleMeta(role) {
+  return ROLE_META[role] || { label: role, cls: "role-other" };
+}
+
 function renderTokenPanel(usage, entry, resp) {
   const effectiveUsage = usage || estimateUsage(entry, resp);
   if (!effectiveUsage) return "";
@@ -632,7 +680,9 @@ function renderTokenPanel(usage, entry, resp) {
   const cached = effectiveUsage.prompt_tokens_details?.cached_tokens ?? 0;
   const actualPrompt = prompt - cached;
   const actualCompl = compl - reasoning;
+  const breakdown = effectiveUsage.role_breakdown; // may be undefined for real usage
 
+  // ── Main bar (prompt / completion / cached / reasoning) ──
   const segs = [];
   if (total > 0) {
     if (cached > 0) segs.push({ c: "cached", p: cached/total*100, l: `缓存 ${cached}` });
@@ -640,11 +690,11 @@ function renderTokenPanel(usage, entry, resp) {
     if (reasoning > 0) segs.push({ c: "reasoning", p: reasoning/total*100, l: `推理 ${reasoning}` });
     if (actualCompl > 0) segs.push({ c: "completion", p: actualCompl/total*100, l: `输出 ${actualCompl}` });
   }
-
   const bar = segs.map(s =>
     `<div class="tbar-seg ${s.c}" style="width:${Math.max(s.p,2).toFixed(1)}%" title="${s.l}">${s.p > 12 ? s.l : ""}</div>`
   ).join("");
 
+  // ── Summary stats ──
   const items = [];
   items.push(tsItem("prompt", "Prompt", prompt));
   if (cached > 0) items.push(tsItem("cached", "缓存命中", cached));
@@ -654,15 +704,31 @@ function renderTokenPanel(usage, entry, resp) {
   if (cached > 0 && prompt > 0) {
     items.push(`<div class="ts-item">缓存率<strong>${((cached/prompt)*100).toFixed(1)}%</strong></div>`);
   }
-  if (effectiveUsage.estimated) {
-    items.push(`<div class="ts-item">Prompt 字符<strong>${effectiveUsage.prompt_chars}</strong></div>`);
-    items.push(`<div class="ts-item">输出字符<strong>${effectiveUsage.completion_chars}</strong></div>`);
+
+  // ── Role breakdown bar + table (estimated or real w/ breakdown) ──
+  let roleHtml = "";
+  if (breakdown && breakdown.length > 0) {
+    // sort by tokens descending
+    const sorted = [...breakdown].sort((a, b) => b.tokens - a.tokens);
+    const roleTotal = sorted.reduce((s, r) => s + r.tokens, 0) || 1;
+    const roleBar = sorted.map(r => {
+      const m = roleMeta(r.role);
+      const pct = r.tokens / roleTotal * 100;
+      return `<div class="tbar-seg ${m.cls}" style="width:${Math.max(pct,2).toFixed(1)}%" title="${m.label} ${r.tokens}">${pct > 10 ? m.label + " " + r.tokens : ""}</div>`;
+    }).join("");
+    const roleRows = sorted.map(r => {
+      const m = roleMeta(r.role);
+      const pct = (r.tokens / roleTotal * 100).toFixed(1);
+      return `<div class="ts-item"><span class="ts-dot ${m.cls}"></span>${m.label}<strong>${r.tokens}</strong><span class="ts-pct">${pct}%</span><span class="ts-chars">${r.chars} 字符</span></div>`;
+    }).join("");
+    roleHtml = `<div class="role-breakdown"><div class="role-breakdown-title">Prompt 构成明细</div><div class="token-bar">${roleBar}</div><div class="token-stats">${roleRows}</div></div>`;
   }
+
   const note = effectiveUsage.estimated
     ? '<div class="token-note">当前记录未返回官方 usage，以上为基于 CJK 0.7t/字 + EN 1.3t/词 的近似估算；新流式请求已自动补齐 usage 回传。</div>'
     : "";
   const title = effectiveUsage.estimated ? "Token 用量（估算）" : "Token 用量";
-  return `<div class="token-panel"><h4>${title}</h4><div class="token-bar">${bar}</div><div class="token-stats">${items.join("")}</div>${note}</div>`;
+  return `<div class="token-panel"><h4>${title}</h4><div class="token-bar">${bar}</div><div class="token-stats">${items.join("")}</div>${roleHtml}${note}</div>`;
 }
 
 function tsItem(cls, label, val) {
