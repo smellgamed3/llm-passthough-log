@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import secrets
 import time
 import uuid
@@ -28,6 +29,66 @@ HOP_BY_HOP_HEADERS = {
     "upgrade",
     "content-length",
 }
+
+SENSITIVE_FIELD_NAMES = {
+    "authorization",
+    "proxy_authorization",
+    "x_api_key",
+    "api_key",
+    "apikey",
+    "downstream_apikey",
+    "access_token",
+    "refresh_token",
+    "client_secret",
+    "secret",
+    "token",
+}
+
+BEARER_TOKEN_RE = re.compile(r"(?i)\bbearer\s+([^\s,;]+)")
+SK_TOKEN_RE = re.compile(r"\bsk-[A-Za-z0-9._\-]+\b")
+
+
+def normalize_field_name(name: str) -> str:
+    return name.strip().lower().replace("-", "_")
+
+
+def mask_secret(value: str) -> str:
+    stripped = value.strip()
+    if not stripped:
+        return stripped
+    if stripped.lower().startswith("sk-"):
+        return "***" if len(stripped) <= 6 else "***..." + stripped[-4:]
+    if len(stripped) <= 4:
+        return "*" * len(stripped)
+    if len(stripped) <= 8:
+        return stripped[:1] + "***" + stripped[-1:]
+    return stripped[:4] + "..." + stripped[-4:]
+
+
+def mask_sensitive_text(value: str) -> str:
+    stripped = value.strip()
+    if stripped.lower().startswith("bearer "):
+        token = stripped[7:].strip()
+        return f"Bearer {mask_secret(token)}"
+    return mask_secret(stripped)
+
+
+def sanitize_string_for_web(value: str, key_name: Optional[str] = None) -> str:
+    if key_name and normalize_field_name(key_name) in SENSITIVE_FIELD_NAMES:
+        return mask_sensitive_text(value)
+
+    masked = BEARER_TOKEN_RE.sub(lambda match: f"Bearer {mask_secret(match.group(1))}", value)
+    return SK_TOKEN_RE.sub(lambda match: mask_secret(match.group(0)), masked)
+
+
+def sanitize_for_web(value: Any, *, key_name: Optional[str] = None) -> Any:
+    if isinstance(value, dict):
+        return {key: sanitize_for_web(item, key_name=key) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitize_for_web(item, key_name=key_name) for item in value]
+    if isinstance(value, str):
+        return sanitize_string_for_web(value, key_name=key_name)
+    return value
 
 
 def filter_request_headers(headers: Dict[str, str]) -> Dict[str, str]:
@@ -207,6 +268,27 @@ def create_app(
             "created_at": user.get("created_at"),
         }
 
+    def _serialize_provider(provider: Dict[str, Any]) -> Dict[str, Any]:
+        payload = {
+            "id": provider["id"],
+            "name": sanitize_string_for_web(str(provider["name"])),
+            "prefix_path": sanitize_string_for_web(str(provider["prefix_path"])),
+            "downstream_url": sanitize_string_for_web(str(provider.get("downstream_url") or "")),
+            "enabled": int(bool(provider.get("enabled", 1))),
+            "input_price": provider.get("input_price", 0),
+            "output_price": provider.get("output_price", 0),
+            "notes": sanitize_for_web(provider.get("notes")),
+            "created_at": provider.get("created_at"),
+            "has_downstream_apikey": bool(provider.get("downstream_apikey")),
+        }
+        if provider.get("downstream_apikey"):
+            payload["downstream_apikey_masked"] = mask_secret(str(provider["downstream_apikey"]))
+        return payload
+
+    async def _enqueue_sanitized_log(entry: Dict[str, Any]) -> None:
+        # Store masked payloads to avoid leaking secrets from DB/jsonl exports.
+        await runtime.log_store.enqueue(sanitize_for_web(entry))
+
     # ── Auth helpers ──────────────────────────────────────────────────────
 
     async def _resolve_user(request: Request) -> Optional[Dict[str, Any]]:
@@ -268,7 +350,8 @@ def create_app(
         user = _require_auth(user)
         result: Dict[str, Any] = {"user": _serialize_user(user)}
         if user.get("role") == "admin":
-            result["providers"] = await runtime.log_store.list_providers()
+            providers = await runtime.log_store.list_providers()
+            result["providers"] = [_serialize_provider(provider) for provider in providers]
         else:
             pids = await runtime.log_store.get_user_provider_ids(user["id"])
             result["provider_ids"] = pids
@@ -291,7 +374,7 @@ def create_app(
         if user.get("role") == "admin":
             result["downstream_url"] = resolved_settings.downstream_url
             result["provider_routes"] = resolved_settings.provider_routes
-        return result
+        return sanitize_for_web(result)
 
     @app.get("/admin/api/logs", include_in_schema=False)
     async def admin_logs(
@@ -314,7 +397,7 @@ def create_app(
         user = _require_auth(user)
         allowed = await _get_allowed_providers(user)
         bounded_page_size = min(page_size, resolved_settings.admin_page_size_max)
-        return await runtime.log_store.list_logs(
+        payload = await runtime.log_store.list_logs(
             query=q,
             provider=provider,
             model=model,
@@ -330,6 +413,7 @@ def create_app(
             page_size=bounded_page_size,
             allowed_providers=allowed,
         )
+        return sanitize_for_web(payload)
 
     @app.get("/admin/api/logs/{log_id}", include_in_schema=False)
     async def admin_log_detail(log_id: str, request: Request) -> Dict[str, Any]:
@@ -343,7 +427,7 @@ def create_app(
             allowed = await _get_allowed_providers(user)
             if allowed is not None and log_entry.get("provider") not in allowed:
                 raise HTTPException(status_code=403, detail="access denied")
-        return log_entry
+        return sanitize_for_web(log_entry)
 
     # ── User management API ───────────────────────────────────────────────
 
@@ -451,7 +535,7 @@ def create_app(
         user = await _resolve_user(request)
         _require_admin(user)
         providers = await runtime.log_store.list_providers()
-        return {"items": providers}
+        return {"items": [_serialize_provider(provider) for provider in providers]}
 
     @app.post("/admin/api/providers", include_in_schema=False)
     async def admin_create_provider(request: Request) -> Dict[str, Any]:
@@ -473,7 +557,7 @@ def create_app(
             notes=data.get("notes") or None,
         )
         await runtime.refresh_provider_cache()
-        return provider
+        return _serialize_provider(provider)
 
     @app.get("/admin/api/providers/{provider_id}", include_in_schema=False)
     async def admin_get_provider(provider_id: str, request: Request) -> Dict[str, Any]:
@@ -482,7 +566,7 @@ def create_app(
         provider = await runtime.log_store.get_provider(provider_id)
         if provider is None:
             raise HTTPException(status_code=404, detail="provider not found")
-        return provider
+        return _serialize_provider(provider)
 
     @app.put("/admin/api/providers/{provider_id}", include_in_schema=False)
     async def admin_update_provider(provider_id: str, request: Request) -> Dict[str, Any]:
@@ -511,7 +595,7 @@ def create_app(
         if provider is None:
             raise HTTPException(status_code=404, detail="provider not found")
         await runtime.refresh_provider_cache()
-        return provider
+        return _serialize_provider(provider)
 
     @app.delete("/admin/api/providers/{provider_id}", include_in_schema=False)
     async def admin_delete_provider(provider_id: str, request: Request) -> Dict[str, Any]:
@@ -593,7 +677,7 @@ def create_app(
             log_entry["duration_ms"] = round((time.perf_counter() - started_at) * 1000, 3)
             log_entry["response_status"] = 502
             log_entry["error"] = str(exc)
-            await runtime.log_store.enqueue(log_entry)
+            await _enqueue_sanitized_log(log_entry)
             return JSONResponse(
                 status_code=502,
                 content={"detail": "downstream request failed", "error": str(exc)},
@@ -624,7 +708,7 @@ def create_app(
                     log_entry["response_size"] = len(combined)
                     if stream_error:
                         log_entry["error"] = stream_error
-                    await runtime.log_store.enqueue(log_entry)
+                    await _enqueue_sanitized_log(log_entry)
 
             return StreamingResponse(
                 stream_response(),
@@ -641,7 +725,7 @@ def create_app(
             log_entry["response_status"] = 502
             log_entry["response_headers"] = dict(upstream_response.headers)
             log_entry["error"] = str(exc)
-            await runtime.log_store.enqueue(log_entry)
+            await _enqueue_sanitized_log(log_entry)
             return JSONResponse(
                 status_code=502,
                 content={"detail": "downstream response read failed", "error": str(exc)},
@@ -658,7 +742,7 @@ def create_app(
         log_entry["response_headers"] = dict(upstream_response.headers)
         log_entry["response_body"] = decode_payload(response_body_raw)
         log_entry["response_size"] = len(response_body_raw)
-        await runtime.log_store.enqueue(log_entry)
+        await _enqueue_sanitized_log(log_entry)
 
         return Response(
             content=response_body_raw,

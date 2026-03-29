@@ -1,5 +1,6 @@
 import gzip
 import json
+import sqlite3
 
 import httpx
 from fastapi.testclient import TestClient
@@ -82,6 +83,109 @@ def test_proxy_logs_non_stream_request(tmp_path):
         detail = client.get(f"/admin/api/logs/{logs['items'][0]['id']}", headers=admin_headers).json()
         assert detail["response_status"] == 200
         assert detail["request_body"]["messages"][0]["content"] == "hello"
+
+
+def test_admin_log_detail_masks_sensitive_values(tmp_path):
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={"id": "resp_1", "choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    app = create_app(build_settings(tmp_path), downstream_transport=transport)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-test",
+                "api_key": "sk-inline-body-secret-12345678",
+                "messages": [{"role": "user", "content": "authorization Bearer sk-request-secret-987654321"}],
+            },
+            headers={"Authorization": "Bearer sk-header-secret-1234567890"},
+        )
+        assert response.status_code == 200
+
+    with TestClient(app) as client:
+        admin_headers = login_admin(client)
+        logs = client.get("/admin/api/logs", headers=admin_headers).json()
+        detail = client.get(f"/admin/api/logs/{logs['items'][0]['id']}", headers=admin_headers)
+        assert detail.status_code == 200
+        payload = detail.json()
+        raw = json.dumps(payload, ensure_ascii=False)
+        assert "sk-header-secret-1234567890" not in raw
+        assert "sk-inline-body-secret-12345678" not in raw
+        assert "sk-request-secret-987654321" not in raw
+        assert payload["request_headers"]["authorization"].startswith("Bearer ")
+        assert "..." in payload["request_headers"]["authorization"]
+        assert payload["request_body"]["api_key"] != "sk-inline-body-secret-12345678"
+
+
+def test_admin_logs_list_masks_preview_sensitive_values(tmp_path):
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={"id": "resp_1", "choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+        )
+
+    app = create_app(build_settings(tmp_path), downstream_transport=httpx.MockTransport(handler))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-test",
+                "messages": [{"role": "user", "content": "authorization Bearer sk-preview-secret-12345678"}],
+            },
+        )
+        assert response.status_code == 200
+
+    with TestClient(app) as client:
+        admin_headers = login_admin(client)
+        logs = client.get("/admin/api/logs", headers=admin_headers)
+        assert logs.status_code == 200
+        payload = logs.json()
+        preview = payload["items"][0]["preview"]
+        assert "sk-preview-secret-12345678" not in preview
+        assert "Bearer sk-" not in preview
+        assert "..." in preview
+
+
+def test_storage_entry_json_masks_sensitive_values(tmp_path):
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={"id": "resp_1", "choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+        )
+
+    app = create_app(build_settings(tmp_path), downstream_transport=httpx.MockTransport(handler))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "gpt-test",
+                "api_key": "sk-store-body-secret-12345678",
+                "messages": [{"role": "user", "content": "authorization Bearer sk-store-msg-secret-12345678"}],
+            },
+            headers={"Authorization": "Bearer sk-store-header-secret-12345678"},
+        )
+        assert response.status_code == 200
+
+    with sqlite3.connect(tmp_path / "logs.db") as conn:
+        row = conn.execute("SELECT entry_json, preview FROM logs ORDER BY created_at DESC LIMIT 1").fetchone()
+        assert row is not None
+        entry_json, preview = row
+
+    assert "sk-store-body-secret-12345678" not in entry_json
+    assert "sk-store-msg-secret-12345678" not in entry_json
+    assert "sk-store-header-secret-12345678" not in entry_json
+    assert "Bearer sk-" not in entry_json
+    assert "Bearer sk-" not in preview
 
 
 def test_proxy_supports_sse_passthrough(tmp_path):
@@ -398,6 +502,45 @@ def test_provider_crud_lifecycle(tmp_path):
         # 确认已删除
         resp = client.get(f"/admin/api/providers/{pid}", headers=admin_headers)
         assert resp.status_code == 404
+
+
+def test_provider_api_masks_downstream_apikey_for_web(tmp_path):
+    app = create_app(
+        build_settings(tmp_path),
+        downstream_transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True})),
+    )
+
+    with TestClient(app) as client:
+        admin_headers = login_admin(client)
+        secret = "sk-provider-secret-1234567890"
+        resp = client.post(
+            "/admin/api/providers",
+            json={
+                "name": "Secret Provider",
+                "prefix_path": "secret",
+                "downstream_url": "https://api.example.com",
+                "downstream_apikey": secret,
+            },
+            headers=admin_headers,
+        )
+        assert resp.status_code == 200
+        created = resp.json()
+        assert created["has_downstream_apikey"] is True
+        assert created["downstream_apikey_masked"] != secret
+        assert secret not in json.dumps(created, ensure_ascii=False)
+
+        provider_id = created["id"]
+        detail = client.get(f"/admin/api/providers/{provider_id}", headers=admin_headers)
+        assert detail.status_code == 200
+        assert secret not in json.dumps(detail.json(), ensure_ascii=False)
+
+        listing = client.get("/admin/api/providers", headers=admin_headers)
+        assert listing.status_code == 200
+        assert secret not in json.dumps(listing.json(), ensure_ascii=False)
+
+        session_data = client.get("/admin/api/session", headers=admin_headers)
+        assert session_data.status_code == 200
+        assert secret not in json.dumps(session_data.json(), ensure_ascii=False)
 
 
 def test_auth_required_when_admin_key_set(tmp_path):

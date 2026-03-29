@@ -5,12 +5,35 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+
+PREVIEW_BEARER_TOKEN_RE = re.compile(r"(?i)\bbearer\s+([^\s,;]+)")
+PREVIEW_SK_TOKEN_RE = re.compile(r"\bsk-[A-Za-z0-9._\-]+\b")
+
+
+def _mask_preview_secret(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return text
+    if text.lower().startswith("sk-"):
+        return "***" if len(text) <= 6 else "***..." + text[-4:]
+    if len(text) <= 4:
+        return "*" * len(text)
+    if len(text) <= 8:
+        return text[:1] + "***" + text[-1:]
+    return text[:4] + "..." + text[-4:]
+
+
+def sanitize_preview_text(value: str) -> str:
+    masked = PREVIEW_BEARER_TOKEN_RE.sub(lambda match: f"Bearer {_mask_preview_secret(match.group(1))}", value)
+    return PREVIEW_SK_TOKEN_RE.sub(lambda match: _mask_preview_secret(match.group(0)), masked)
 
 
 def decode_payload(raw: bytes) -> Any:
@@ -93,7 +116,7 @@ def build_preview(entry: Dict[str, Any], limit: int = 220) -> str:
         raw = dumps_json(request_body if request_body is not None else response_body)
         candidates.append(raw)
     preview = " | ".join(item.replace("\n", " ") for item in candidates if item)
-    return preview[:limit]
+    return sanitize_preview_text(preview[:limit])
 
 
 class LogStore:
@@ -371,7 +394,10 @@ class LogStore:
             "totals": dict(totals) if totals else {},
             "providers": [dict(row) for row in provider_rows],
             "statuses": [dict(row) for row in status_rows],
-            "recent": [dict(row) for row in recent_rows],
+            "recent": [
+                {**dict(row), "preview": sanitize_preview_text(str(dict(row).get("preview") or ""))}
+                for row in recent_rows
+            ],
         }
 
     def _list_logs_sync(
@@ -453,8 +479,13 @@ class LogStore:
                 [*params, page_size, offset],
             ).fetchall()
         total = int(total_row["total"]) if total_row else 0
+        items = []
+        for row in rows:
+            payload = dict(row)
+            payload["preview"] = sanitize_preview_text(str(payload.get("preview") or ""))
+            items.append(payload)
         return {
-            "items": [dict(row) for row in rows],
+            "items": items,
             "pagination": {
                 "page": page,
                 "page_size": page_size,

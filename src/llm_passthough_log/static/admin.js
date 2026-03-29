@@ -24,6 +24,56 @@ function esc(v) {
   return String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 }
 
+const SENSITIVE_KEYS = new Set([
+  "authorization",
+  "proxy_authorization",
+  "x_api_key",
+  "api_key",
+  "apikey",
+  "downstream_apikey",
+  "access_token",
+  "refresh_token",
+  "client_secret",
+  "secret",
+  "token",
+]);
+
+function normalizeSensitiveKey(key) {
+  return String(key || "").trim().toLowerCase().replace(/-/g, "_");
+}
+
+function maskSecretText(value) {
+  const text = String(value || "").trim();
+  if (!text) return text;
+  if (text.toLowerCase().startsWith("bearer ")) {
+    return "Bearer " + maskSecretText(text.slice(7).trim());
+  }
+  if (text.toLowerCase().startsWith("sk-")) {
+    return text.length <= 6 ? "***" : "***..." + text.slice(-4);
+  }
+  if (text.length <= 4) return "*".repeat(text.length);
+  if (text.length <= 8) return text.slice(0, 1) + "***" + text.slice(-1);
+  return text.slice(0, 4) + "..." + text.slice(-4);
+}
+
+function sanitizeDisplayValue(value, keyName) {
+  if (typeof value !== "string") return value;
+  if (keyName && SENSITIVE_KEYS.has(normalizeSensitiveKey(keyName))) {
+    return maskSecretText(value);
+  }
+  return value
+    .replace(/\bBearer\s+([^\s,;]+)/gi, (_, token) => `Bearer ${maskSecretText(token)}`)
+    .replace(/\bsk-[A-Za-z0-9._-]+\b/g, token => maskSecretText(token));
+}
+
+function sanitizeDisplayData(value, keyName) {
+  if (Array.isArray(value)) return value.map(item => sanitizeDisplayData(item, keyName));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, sanitizeDisplayData(v, k)]));
+  }
+  return sanitizeDisplayValue(value, keyName);
+}
+
 async function fetchJSON(url, opts) {
   opts = opts || {};
   if (!opts.headers) opts.headers = {};
@@ -251,14 +301,14 @@ document.getElementById("logoutBtn").addEventListener("click", () => {
 
 /* ── JSON 语法高亮 ────────────────────────────────── */
 
-function highlightJSON(obj, indent) {
+function highlightJSON(obj, indent, keyName) {
   indent = indent || 0;
   const pad = "  ".repeat(indent);
   if (obj === null) return '<span class="jnull">null</span>';
   if (typeof obj === "boolean") return `<span class="jb">${obj}</span>`;
   if (typeof obj === "number") return `<span class="jn">${obj}</span>`;
   if (typeof obj === "string") {
-    const s = JSON.stringify(obj);
+    const s = JSON.stringify(sanitizeDisplayValue(obj, keyName));
     if (s.length > 500) {
       return `<span class="js">${esc(s.slice(0, 400))}</span><span class="jnull">…(${s.length} chars)</span><span class="js">${esc(s.slice(-50))}</span>`;
     }
@@ -266,14 +316,14 @@ function highlightJSON(obj, indent) {
   }
   if (Array.isArray(obj)) {
     if (!obj.length) return '<span class="jpunc">[]</span>';
-    const items = obj.map(v => pad + "  " + highlightJSON(v, indent + 1));
+    const items = obj.map(v => pad + "  " + highlightJSON(v, indent + 1, keyName));
     return '<span class="jpunc">[</span>\n' + items.join(',\n') + '\n' + pad + '<span class="jpunc">]</span>';
   }
   if (typeof obj === "object") {
     const keys = Object.keys(obj);
     if (!keys.length) return '<span class="jpunc">{}</span>';
     const entries = keys.map(k => {
-      return pad + '  <span class="jk">' + esc(JSON.stringify(k)) + '</span><span class="jpunc">: </span>' + highlightJSON(obj[k], indent + 1);
+      return pad + '  <span class="jk">' + esc(JSON.stringify(k)) + '</span><span class="jpunc">: </span>' + highlightJSON(obj[k], indent + 1, k);
     });
     return '<span class="jpunc">{</span>\n' + entries.join(',\n') + '\n' + pad + '<span class="jpunc">}</span>';
   }
@@ -409,6 +459,7 @@ async function loadLogs() {
     const active = (i.id === state.selectedTraceId) ? " active" : "";
     const stream = i.request_stream ? '<span class="tc-stream">⚡</span>' : "";
     const cost = i.estimated_cost ? `<span class="tc-cost">${fmtCost(i.estimated_cost)}</span>` : "";
+    const preview = sanitizeDisplayValue(i.preview || "", "preview");
     return `
       <div class="trace-card${active}" data-id="${i.id}">
         <div class="tc-row1">
@@ -421,7 +472,7 @@ async function loadLogs() {
         <div class="tc-row2">
           <span class="tc-time">${fmtTime(i.created_at)}</span>
           <span class="tc-dur">${fmtMs(i.duration_ms)}</span>
-          <span class="tc-preview">${esc(i.preview || "")}</span>
+          <span class="tc-preview">${esc(preview)}</span>
         </div>
       </div>`;
   }).join("");
@@ -746,6 +797,7 @@ function renderParamsSection(body) {
   return '<div class="params-section">' + params.map(([k, v]) => {
     let display = v;
     if (typeof v === "object" && v !== null) display = JSON.stringify(v);
+    display = sanitizeDisplayValue(String(display), k);
     return `<div class="param-chip"><div class="pk">${esc(k)}</div><div class="pv">${esc(String(display))}</div></div>`;
   }).join("") + '</div>';
 }
@@ -776,13 +828,13 @@ function renderMsgBubble(msg, idx, total, open) {
   const content = msg.content;
   if (typeof content === "string") {
     meta = `${content.length} 字符`;
-    bodyHtml = `<div class="msg-content">${esc(content)}</div>`;
+    bodyHtml = `<div class="msg-content">${esc(sanitizeDisplayValue(content, "content"))}</div>`;
   } else if (Array.isArray(content)) {
     meta = `${content.length} 部分`;
     const parts = content.map(p => {
-      if (p.type === "text") return `<div style="white-space:pre-wrap">${esc(p.text || "")}</div>`;
+      if (p.type === "text") return `<div style="white-space:pre-wrap">${esc(sanitizeDisplayValue(p.text || "", "text"))}</div>`;
       if (p.type === "image_url") return `<div style="color:var(--text-muted)">[图片: ${esc((p.image_url?.url || "").slice(0, 80))}…]</div>`;
-      return `<div><pre style="margin:0">${esc(JSON.stringify(p, null, 2))}</pre></div>`;
+      return `<div><pre style="margin:0">${esc(JSON.stringify(sanitizeDisplayData(p), null, 2))}</pre></div>`;
     }).join("");
     bodyHtml = `<div class="msg-content msg-content-multipart">${parts}</div>`;
   } else if (content == null) {
@@ -791,24 +843,26 @@ function renderMsgBubble(msg, idx, total, open) {
       bodyHtml = '<div class="msg-content">' + msg.tool_calls.map(tc => {
         const fn = tc.function || {};
         let args = fn.arguments || "";
-        try { args = JSON.stringify(JSON.parse(args), null, 2); } catch {}
+        try { args = JSON.stringify(sanitizeDisplayData(JSON.parse(args)), null, 2); } catch { args = sanitizeDisplayValue(args, "arguments"); }
         return `<div class="tool-card" style="margin-bottom:6px"><div class="tool-card-head" onclick="event.stopPropagation();this.parentElement.classList.toggle('closed')"><span class="tool-icon">⚙</span><span class="tool-fname">${esc(fn.name || "")}</span><span class="tool-arrow">▼</span></div><div class="tool-card-body"><pre>${esc(args)}</pre></div></div>`;
       }).join("") + '</div>';
     } else if (msg.function_call) {
       meta = "函数调用";
-      bodyHtml = `<div class="msg-content"><pre style="margin:0">${esc(JSON.stringify(msg.function_call, null, 2))}</pre></div>`;
+      bodyHtml = `<div class="msg-content"><pre style="margin:0">${esc(JSON.stringify(sanitizeDisplayData(msg.function_call), null, 2))}</pre></div>`;
     } else {
       bodyHtml = '<div class="msg-content" style="color:var(--text-muted)">（空）</div>';
     }
   } else {
-    bodyHtml = `<div class="msg-content"><pre style="margin:0">${esc(JSON.stringify(content, null, 2))}</pre></div>`;
+    bodyHtml = `<div class="msg-content"><pre style="margin:0">${esc(JSON.stringify(sanitizeDisplayData(content), null, 2))}</pre></div>`;
   }
 
   let extraInfo = "";
   if (msg.tool_call_id) extraInfo += `<span style="font-family:var(--mono);font-size:10px">id: ${esc(msg.tool_call_id.slice(0,12))}…</span>`;
   if (msg.name) extraInfo += `<span>${esc(msg.name)}</span>`;
 
-  const copyData = typeof content === "string" ? content : JSON.stringify(content ?? msg.tool_calls ?? msg.function_call, null, 2);
+  const copyData = typeof content === "string"
+    ? sanitizeDisplayValue(content, "content")
+    : JSON.stringify(sanitizeDisplayData(content ?? msg.tool_calls ?? msg.function_call), null, 2);
 
   return `
     <div class="msg-bubble${collapsed}">
@@ -870,11 +924,11 @@ function renderResponseBlock(resp) {
   let html = '<div class="response-block">';
 
   if (resp.reasoning) {
-    html += `<div class="reasoning-box"><div class="reas-label">💭 推理过程 <span style="font-weight:400;color:var(--text-muted)">(${resp.reasoning.length} 字符)</span></div><div class="reas-text">${esc(resp.reasoning)}</div></div>`;
+    html += `<div class="reasoning-box"><div class="reas-label">💭 推理过程 <span style="font-weight:400;color:var(--text-muted)">(${resp.reasoning.length} 字符)</span></div><div class="reas-text">${esc(sanitizeDisplayValue(resp.reasoning, "reasoning"))}</div></div>`;
   }
 
   if (resp.content) {
-    html += `<div class="content-box">${esc(resp.content)}</div>`;
+    html += `<div class="content-box">${esc(sanitizeDisplayValue(resp.content, "content"))}</div>`;
   }
 
   if (resp.toolCalls && resp.toolCalls.length) {
@@ -887,7 +941,7 @@ function renderResponseBlock(resp) {
         const parsed = JSON.parse(args);
         argsHtml = '<div class="json-view" style="max-height:300px">' + highlightJSON(parsed) + '</div>';
       } catch {
-        argsHtml = `<pre>${esc(args)}</pre>`;
+        argsHtml = `<pre>${esc(sanitizeDisplayValue(args, "arguments"))}</pre>`;
       }
       html += `<div class="tool-card"><div class="tool-card-head" onclick="this.parentElement.classList.toggle('closed')"><span class="tool-icon">⚙</span><span class="tool-fname">${esc(fn.name || "")}</span>${tc.id ? `<span class="tool-desc-text">id: ${esc(tc.id.slice(0, 20))}</span>` : ""}<span class="tool-arrow">▼</span></div><div class="tool-card-body">${argsHtml}</div></div>`;
     }
@@ -907,7 +961,7 @@ function renderResponseBlock(resp) {
 function renderHeadersSection(title, headers) {
   if (!headers || !Object.keys(headers).length) return "";
   const rows = Object.entries(headers).map(([k, v]) =>
-    `<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`
+    `<tr><td>${esc(k)}</td><td>${esc(String(sanitizeDisplayValue(String(v), k)))}</td></tr>`
   ).join("");
   return `<div class="collapse-section"><div class="collapse-head" onclick="this.parentElement.classList.toggle('closed')"><span class="collapse-arrow">▼</span>${title} (${Object.keys(headers).length})</div><div class="collapse-body"><table class="hdr-table">${rows}</table></div></div>`;
 }
@@ -1085,7 +1139,10 @@ function openProvDlg(title, data) {
   provNodes.name.value = data.name || "";
   provNodes.prefix.value = data.prefix_path || "";
   provNodes.url.value = data.downstream_url || "";
-  provNodes.apikey.value = data.downstream_apikey || "";
+  provNodes.apikey.value = "";
+  provNodes.apikey.placeholder = data.has_downstream_apikey
+    ? `已设置 (${data.downstream_apikey_masked || "已脱敏"})，留空则保持不变`
+    : "留空表示不设置";
   provNodes.inputPrice.value = data.input_price || 0;
   provNodes.outputPrice.value = data.output_price || 0;
   provNodes.notes.value = data.notes || "";
@@ -1103,12 +1160,13 @@ document.getElementById("provDialogSubmitBtn").addEventListener("click", async (
     name: provNodes.name.value.trim(),
     prefix_path: provNodes.prefix.value.trim(),
     downstream_url: provNodes.url.value.trim(),
-    downstream_apikey: provNodes.apikey.value.trim(),
     input_price: parseFloat(provNodes.inputPrice.value) || 0,
     output_price: parseFloat(provNodes.outputPrice.value) || 0,
     notes: provNodes.notes.value.trim(),
     enabled: provNodes.enabled.checked,
   };
+  const apiKey = provNodes.apikey.value.trim();
+  if (apiKey) body.downstream_apikey = apiKey;
   if (!body.name || !body.prefix_path || !body.downstream_url) {
     alert("名称、前缀路径、Downstream URL 为必填项");
     return;
