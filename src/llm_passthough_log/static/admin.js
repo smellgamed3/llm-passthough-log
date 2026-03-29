@@ -79,10 +79,30 @@ function fmtCost(v) {
 
 function estimateTokenCount(text) {
   if (!text) return 0;
-  const normalized = String(text);
-  const asciiChars = (normalized.match(/[\u0000-\u007f]/g) || []).length;
-  const nonAsciiChars = normalized.length - asciiChars;
-  return Math.max(1, Math.round(asciiChars / 4 + nonAsciiChars * 1.15));
+  const s = String(text);
+  // CJK Unified Ideographs + Extension A/B + Compatibility
+  const cjkChars = (s.match(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/g) || []).length;
+  // CJK / fullwidth punctuation
+  const cjkPunct = (s.match(/[\u3000-\u303f\uff01-\uff60\ufe30-\ufe4f\u2018-\u201f\u2026\u2014]/g) || []).length;
+  // English word sequences
+  const enWords = s.match(/[a-zA-Z]+/g) || [];
+  const enLetters = enWords.reduce((n, w) => n + w.length, 0);
+  // Digit sequences
+  const digitSeqs = s.match(/\d+/g) || [];
+  const digitChars = digitSeqs.reduce((n, d) => n + d.length, 0);
+  // Whitespace
+  const wsChars = (s.match(/\s/g) || []).length;
+  // Remaining (ASCII punct, emoji, other non-ASCII)
+  const otherChars = Math.max(0, s.length - cjkChars - cjkPunct - enLetters - digitChars - wsChars);
+
+  const tokens =
+    cjkChars * 0.7 +         // common bigrams often merge into 1 token
+    cjkPunct * 1.0 +         // fullwidth punct ≈ 1 tok each
+    enWords.length * 1.3 +   // English ~1.3 tok/word
+    digitChars / 3.3 +       // ~3 digits/token
+    wsChars * 0.15 +         // whitespace mostly merged
+    otherChars * 1.0;        // fallback
+  return Math.max(1, Math.round(tokens));
 }
 
 function collectContentText(value) {
@@ -639,7 +659,7 @@ function renderTokenPanel(usage, entry, resp) {
     items.push(`<div class="ts-item">输出字符<strong>${effectiveUsage.completion_chars}</strong></div>`);
   }
   const note = effectiveUsage.estimated
-    ? '<div class="token-note">当前记录未返回官方 usage，以上为字符长度估算；新流式请求已自动补齐 usage 回传。</div>'
+    ? '<div class="token-note">当前记录未返回官方 usage，以上为基于 CJK 0.7t/字 + EN 1.3t/词 的近似估算；新流式请求已自动补齐 usage 回传。</div>'
     : "";
   const title = effectiveUsage.estimated ? "Token 用量（估算）" : "Token 用量";
   return `<div class="token-panel"><h4>${title}</h4><div class="token-bar">${bar}</div><div class="token-stats">${items.join("")}</div>${note}</div>`;
