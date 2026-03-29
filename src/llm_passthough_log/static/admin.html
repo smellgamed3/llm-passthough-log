@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM Proxy Console</title>
+    <link rel="stylesheet" href="/admin/assets/admin.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- ── 顶部导航 ────────────────────────────────── -->
+      <nav class="topbar">
+        <div class="topbar-left">
+          <div class="brand-icon">◈</div>
+          <span class="topbar-brand-text">LLM Proxy</span>
+          <div class="nav-items">
+            <button class="nav-btn active" data-view="traces">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+              Traces
+            </button>
+            <button class="nav-btn" data-view="overview">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+              概览
+            </button>
+            <button class="nav-btn admin-only" data-view="users">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              用户
+            </button>
+            <button class="nav-btn admin-only" data-view="providers">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              Providers
+            </button>
+          </div>
+        </div>
+        <div class="topbar-right">
+          <span class="topbar-info admin-only">Downstream: <strong id="downstreamUrl" title="">-</strong></span>
+          <span class="topbar-info">Queue: <strong id="queueSize">0</strong></span>
+          <span class="topbar-info" id="loginUser"></span>
+          <button id="logoutBtn" class="ghost btn-sm" style="display:none">登出</button>
+        </div>
+      </nav>
+
+      <!-- ── 主内容区 ───────────────────────────────── -->
+      <div class="main-area">
+        <!-- ═══ TRACES 视图 ═══ -->
+        <div class="view active" id="viewTraces">
+          <div class="traces-layout">
+            <!-- 左侧：列表 -->
+            <div class="trace-list-pane">
+              <div class="list-header">
+                <h2>Traces</h2>
+                <button id="refreshLogs" class="icon-btn" title="刷新">⟳</button>
+              </div>
+              <div id="categoryBar" class="category-bar">
+                <button class="cat-btn" data-path="chat/completions">LLM 对话</button>
+                <button class="cat-btn" data-path="embeddings">Embeddings</button>
+                <button class="cat-btn" data-path="models">模型列表</button>
+                <button class="cat-btn" data-path="">全部请求</button>
+              </div>
+              <form id="searchForm" class="search-bar">
+                <input type="text" name="q" placeholder="搜索 prompt、模型名、内容…" />
+                <button type="submit" class="icon-btn search-btn">⏎</button>
+                <button type="button" id="toggleFilters" class="icon-btn" title="高级筛选">⚙</button>
+              </form>
+              <div id="advancedFilters" class="adv-filters" style="display:none">
+                <div class="filter-group">
+                  <label class="filter-label">时间范围</label>
+                  <div class="filter-row">
+                    <input type="datetime-local" id="filterTimeFrom" placeholder="开始时间" />
+                    <span class="filter-sep">—</span>
+                    <input type="datetime-local" id="filterTimeTo" placeholder="结束时间" />
+                  </div>
+                  <div class="quick-time-btns">
+                    <button type="button" class="qtime-btn" data-hours="1">1h</button>
+                    <button type="button" class="qtime-btn" data-hours="6">6h</button>
+                    <button type="button" class="qtime-btn" data-hours="24">24h</button>
+                    <button type="button" class="qtime-btn" data-hours="72">3天</button>
+                    <button type="button" class="qtime-btn" data-hours="168">7天</button>
+                    <button type="button" class="qtime-btn" data-hours="0">全部</button>
+                  </div>
+                </div>
+                <div class="filter-group">
+                  <label class="filter-label">耗时范围 (ms)</label>
+                  <div class="filter-row">
+                    <input type="number" id="filterDurMin" placeholder="最小" min="0" step="100" />
+                    <span class="filter-sep">—</span>
+                    <input type="number" id="filterDurMax" placeholder="最大" min="0" step="100" />
+                  </div>
+                  <div class="quick-time-btns">
+                    <button type="button" class="qdur-btn" data-min="0" data-max="1000">&lt;1s</button>
+                    <button type="button" class="qdur-btn" data-min="1000" data-max="5000">1-5s</button>
+                    <button type="button" class="qdur-btn" data-min="5000" data-max="30000">5-30s</button>
+                    <button type="button" class="qdur-btn" data-min="30000" data-max="">&gt;30s</button>
+                    <button type="button" class="qdur-btn" data-min="" data-max="">全部</button>
+                  </div>
+                </div>
+                <div class="filter-group">
+                  <label class="filter-label">基本筛选</label>
+                  <div class="filter-grid">
+                    <input type="text" name="model" placeholder="Model" form="searchForm" />
+                    <input type="number" name="status" placeholder="状态码" form="searchForm" />
+                    <select name="method" form="searchForm">
+                      <option value="">全部方法</option>
+                      <option value="GET">GET</option>
+                      <option value="POST">POST</option>
+                    </select>
+                    <select name="stream" form="searchForm">
+                      <option value="">全部类型</option>
+                      <option value="true">流式 ⚡</option>
+                      <option value="false">非流式</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="filter-actions">
+                  <button type="button" id="clearFilters" class="ghost btn-sm">清除筛选</button>
+                </div>
+              </div>
+              <div id="logMeta" class="list-meta"></div>
+              <div id="traceList" class="trace-items"></div>
+              <div class="pager">
+                <button id="prevPage" class="ghost" disabled>‹</button>
+                <span id="pageInfo">1 / 1</span>
+                <button id="nextPage" class="ghost" disabled>›</button>
+              </div>
+            </div>
+
+            <!-- 右侧：详情 -->
+            <div class="trace-detail-pane" id="detailSection">
+              <div id="detailPane" class="detail-placeholder">
+                <div class="placeholder-icon">◈</div>
+                <p>选择左侧 Trace 查看详情</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ═══ 概览视图 ═══ -->
+        <div class="view" id="viewOverview">
+          <div class="view-header">
+            <h2>运行概览</h2>
+            <button id="refreshOverview" class="ghost">刷新</button>
+          </div>
+          <div id="statsCards" class="stats-grid"></div>
+          <div class="split-panels">
+            <div class="mini-panel">
+              <h3>状态分布</h3>
+              <div id="statusList" class="chip-list"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ═══ 用户视图 ═══ -->
+        <div class="view" id="viewUsers">
+          <div class="view-header">
+            <h2>用户管理</h2>
+            <button id="createUserBtn">＋ 新建用户</button>
+          </div>
+          <div class="user-controls">
+            <input type="text" id="userSearch" placeholder="搜索名称…" />
+            <span id="userMeta" class="list-meta"></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>角色</th>
+                  <th>Providers</th>
+                  <th>创建时间</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="userRows"></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <button id="userPrevPage" class="ghost">‹</button>
+            <span id="userPageInfo">1 / 1</span>
+            <button id="userNextPage" class="ghost">›</button>
+          </div>
+        </div>
+
+        <!-- ═══ Provider 管理视图 ═══ -->
+        <div class="view" id="viewProviders">
+          <div class="view-header">
+            <h2>Provider 管理</h2>
+            <button id="createProviderBtn">＋ 新建 Provider</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>前缀路径</th>
+                  <th>Downstream URL</th>
+                  <th>Input $/M</th>
+                  <th>Output $/M</th>
+                  <th>状态</th>
+                  <th>备注</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="providerRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Login dialog -->
+    <dialog id="loginDialog">
+      <div class="modal-head"><h3>登录</h3></div>
+      <div class="modal-body">
+        <div class="form-field">
+          <label for="loginName">用户名</label>
+          <input type="text" id="loginName" placeholder="输入用户名" autocomplete="username" />
+        </div>
+        <div class="form-field">
+          <label for="loginPassword">密码</label>
+          <input type="password" id="loginPassword" placeholder="输入密码" autocomplete="current-password" />
+        </div>
+        <div id="loginError" style="color:var(--error);font-size:12px;display:none"></div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="loginSubmitBtn">登录</button>
+      </div>
+    </dialog>
+
+    <!-- User create / edit dialog -->
+    <dialog id="userDialog">
+      <div class="modal-head"><h3 id="dialogTitle">新建用户</h3></div>
+      <div class="modal-body">
+        <input type="hidden" id="fieldUserId" />
+        <div class="form-field">
+          <label for="fieldName">用户名 *</label>
+          <input type="text" id="fieldName" required autocomplete="off" />
+        </div>
+        <div class="form-field">
+          <label for="fieldPassword" id="labelPassword">密码 *</label>
+          <input type="password" id="fieldPassword" autocomplete="new-password" />
+        </div>
+        <div class="form-field">
+          <label for="fieldRole">角色</label>
+          <select id="fieldRole">
+            <option value="user">user（只读）</option>
+            <option value="admin">admin（管理员）</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>可访问 Providers</label>
+          <div id="fieldProviders" class="provider-checks"></div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="dialogCancelBtn" class="ghost">取消</button>
+        <button type="button" id="dialogSubmitBtn">保存</button>
+      </div>
+    </dialog>
+
+    <!-- Provider create / edit dialog -->
+    <dialog id="providerDialog">
+      <div class="modal-head"><h3 id="provDialogTitle">新建 Provider</h3></div>
+      <div class="modal-body">
+        <input type="hidden" id="provFieldId" />
+        <div class="form-field">
+          <label for="provFieldName">名称 *</label>
+          <input type="text" id="provFieldName" required autocomplete="off" placeholder="e.g. OpenAI" />
+        </div>
+        <div class="form-field">
+          <label for="provFieldPrefix">前缀路径 *</label>
+          <input type="text" id="provFieldPrefix" required autocomplete="off" placeholder="e.g. openai" />
+          <small style="color:var(--text-muted)">请求 /prefix/v1/chat → 转发到 downstream_url/v1/chat</small>
+        </div>
+        <div class="form-field">
+          <label for="provFieldUrl">Downstream URL *</label>
+          <input type="text" id="provFieldUrl" required autocomplete="off" placeholder="https://api.openai.com" />
+        </div>
+        <div class="form-field">
+          <label for="provFieldApikey">Downstream API Key</label>
+          <input type="text" id="provFieldApikey" autocomplete="off" placeholder="sk-…" />
+        </div>
+        <div class="form-field" style="display:flex;gap:12px">
+          <div style="flex:1">
+            <label for="provFieldInputPrice">Input 价格 ($/M tokens)</label>
+            <input type="number" id="provFieldInputPrice" min="0" step="0.01" value="0" />
+          </div>
+          <div style="flex:1">
+            <label for="provFieldOutputPrice">Output 价格 ($/M tokens)</label>
+            <input type="number" id="provFieldOutputPrice" min="0" step="0.01" value="0" />
+          </div>
+        </div>
+        <div class="form-field">
+          <label for="provFieldNotes">备注</label>
+          <input type="text" id="provFieldNotes" />
+        </div>
+        <div class="form-field inline">
+          <label>启用状态</label>
+          <label class="toggle">
+            <input type="checkbox" id="provFieldEnabled" checked />
+            <span class="track"></span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="provDialogCancelBtn" class="ghost">取消</button>
+        <button type="button" id="provDialogSubmitBtn">保存</button>
+      </div>
+    </dialog>
+
+    <script src="/admin/assets/admin.js" defer></script>
+  </body>
+</html>

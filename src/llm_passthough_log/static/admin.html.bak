@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM 透明代理控制台</title>
+    <link rel="stylesheet" href="/admin/assets/admin.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Transparent Proxy Console</p>
+          <h1>LLM 透明代理控制台</h1>
+          <p class="subtitle">查看代理健康状态、流量概况、日志检索与完整请求响应详情。</p>
+        </div>
+        <div class="hero-meta">
+          <div>
+            <span>Downstream</span>
+            <strong id="downstreamUrl">-</strong>
+          </div>
+          <div>
+            <span>Queue</span>
+            <strong id="queueSize">0</strong>
+          </div>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="panel panel-wide">
+          <div class="panel-head">
+            <h2>运行概览</h2>
+            <button id="refreshOverview" class="ghost">刷新</button>
+          </div>
+          <div id="statsCards" class="stats"></div>
+          <div class="split">
+            <div>
+              <h3>Provider 分布</h3>
+              <div id="providerList" class="chips"></div>
+            </div>
+            <div>
+              <h3>状态分布</h3>
+              <div id="statusList" class="chips"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel panel-wide">
+          <div class="panel-head">
+            <h2>日志检索</h2>
+            <div class="hint">支持关键字、Provider、模型、状态码、方法和流式筛选</div>
+          </div>
+          <form id="searchForm" class="filters">
+            <input type="text" name="q" placeholder="关键字，例如 prompt、模型名、返回片段" />
+            <input type="text" name="provider" placeholder="provider，例如 openai" />
+            <input type="text" name="model" placeholder="model，例如 gpt-4.1" />
+            <input type="number" name="status" placeholder="状态码" />
+            <select name="method">
+              <option value="">全部方法</option>
+              <option value="GET">GET</option>
+              <option value="POST">POST</option>
+              <option value="PUT">PUT</option>
+              <option value="PATCH">PATCH</option>
+              <option value="DELETE">DELETE</option>
+            </select>
+            <select name="stream">
+              <option value="">全部类型</option>
+              <option value="true">流式</option>
+              <option value="false">非流式</option>
+            </select>
+            <button type="submit">查询</button>
+          </form>
+          <div id="logMeta" class="hint"></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>Provider</th>
+                  <th>模型</th>
+                  <th>方法</th>
+                  <th>状态</th>
+                  <th>耗时</th>
+                  <th>预览</th>
+                </tr>
+              </thead>
+              <tbody id="logRows"></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <button id="prevPage" class="ghost">上一页</button>
+            <span id="pageInfo">第 1 页</span>
+            <button id="nextPage" class="ghost">下一页</button>
+          </div>
+        </section>
+
+        <section class="panel panel-wide detail-panel" id="detailSection">
+          <div class="panel-head">
+            <h2>对话详情</h2>
+            <div class="detail-head-actions">
+              <button id="toggleRawBtn" class="ghost btn-sm" style="display:none">原始 JSON</button>
+            </div>
+          </div>
+          <div id="detailPane" class="detail-empty">
+            <p class="hint">点击上方任意一条记录查看完整详情</p>
+          </div>
+        </section>
+
+        <section class="panel panel-wide">
+          <div class="panel-head">
+            <h2>用户管理</h2>
+            <button id="createUserBtn">＋ 新建用户</button>
+          </div>
+          <input type="text" id="userSearch" placeholder="搜索名称 / 备注…" style="width:280px" />
+          <div id="userMeta" class="hint" style="margin-top:8px"></div>
+          <div class="table-wrap" style="margin-top:12px">
+            <table>
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>API Key</th>
+                  <th>Downstream URL</th>
+                  <th>状态</th>
+                  <th>创建时间</th>
+                  <th>备注</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="userRows"></tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <button id="userPrevPage" class="ghost">上一页</button>
+            <span id="userPageInfo">第 1 页</span>
+            <button id="userNextPage" class="ghost">下一页</button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- User create / edit dialog -->
+    <dialog id="userDialog">
+      <div class="modal-head">
+        <h3 id="dialogTitle">新建用户</h3>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="fieldUserId" />
+        <div class="form-field">
+          <label for="fieldName">名称 *</label>
+          <input type="text" id="fieldName" required autocomplete="off" />
+        </div>
+        <div class="form-field">
+          <label for="fieldApiKey">API Key</label>
+          <div class="field-row">
+            <input type="text" id="fieldApiKey" placeholder="留空自动生成" autocomplete="off" />
+            <button type="button" id="genApiKeyBtn" class="ghost">生成</button>
+          </div>
+        </div>
+        <div class="form-field">
+          <label for="fieldDownstreamUrl">Downstream URL（覆盖全局，可选）</label>
+          <input type="text" id="fieldDownstreamUrl" placeholder="https://api.openai.com" />
+        </div>
+        <div class="form-field">
+          <label for="fieldDownstreamApikey">Downstream API Key（覆盖全局，可选）</label>
+          <input type="text" id="fieldDownstreamApikey" placeholder="sk-…" autocomplete="off" />
+        </div>
+        <div class="form-field">
+          <label for="fieldNotes">备注</label>
+          <input type="text" id="fieldNotes" />
+        </div>
+        <div class="form-field inline">
+          <label>启用状态</label>
+          <label class="toggle">
+            <input type="checkbox" id="fieldEnabled" checked />
+            <span class="track"></span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="dialogCancelBtn" class="ghost">取消</button>
+        <button type="button" id="dialogSubmitBtn">保存</button>
+      </div>
+    </dialog>
+
+    <script src="/admin/assets/admin.js" defer></script>
+  </body>
+  </html>
