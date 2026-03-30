@@ -883,7 +883,7 @@ function renderParamsSection(body) {
     let display = v;
     if (typeof v === "object" && v !== null) display = JSON.stringify(v);
     display = sanitizeDisplayValue(String(display), k);
-    return `<div class="param-chip"><div class="pk">${esc(k)}</div><div class="pv">${esc(String(display))}</div></div>`;
+    return `<div class="param-chip"><div class="pk">${esc(k)}</div><div class="pv">${esc(String(display))}</div><div class="pv-toggle">展开 ▼</div></div>`;
   }).join("") + '</div>';
 }
 
@@ -978,6 +978,18 @@ function renderDetail(entry) {
 
   pane.innerHTML = html;
   pane.className = "";
+
+  // Detect truncated param chips and add expand/collapse
+  pane.querySelectorAll(".param-chip").forEach(chip => {
+    const pv = chip.querySelector(".pv");
+    if (pv && pv.scrollHeight > pv.clientHeight + 2) {
+      chip.classList.add("truncated");
+      chip.querySelector(".pv-toggle")?.addEventListener("click", () => {
+        chip.classList.toggle("expanded");
+        chip.querySelector(".pv-toggle").textContent = chip.classList.contains("expanded") ? "收起 ▲" : "展开 ▼";
+      });
+    }
+  });
 
   pane.querySelectorAll(".tab-btn").forEach(btn => {
     btn.addEventListener("click", () => {
