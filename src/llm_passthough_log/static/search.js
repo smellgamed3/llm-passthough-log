@@ -40,6 +40,23 @@ function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+function _copyToClipboard(text, feedbackEl) {
+  const ok = () => { if (feedbackEl) { feedbackEl.textContent = '✓'; setTimeout(() => feedbackEl.textContent = '📋', 1500); } };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(ok).catch(() => { _copyFallback(text); ok(); });
+  } else {
+    _copyFallback(text); ok();
+  }
+}
+
+function _copyFallback(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
+}
+
 function fmtTime(ts) {
   if (!ts) return "-";
   return new Date(ts * 1000).toLocaleString("zh-CN", { month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", second:"2-digit" });
@@ -356,10 +373,7 @@ document.getElementById("keyList").addEventListener("click", (e) => {
     const kid = copyBtn.dataset.copy;
     const k = state.keys.find(x => x.id === kid);
     if (k && k.hash) {
-      navigator.clipboard.writeText(k.hash).then(() => {
-        copyBtn.textContent = "✓";
-        setTimeout(() => { copyBtn.textContent = "📋"; }, 1500);
-      });
+      _copyToClipboard(k.hash, copyBtn);
     }
     return;
   }

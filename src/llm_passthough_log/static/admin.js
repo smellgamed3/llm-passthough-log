@@ -145,9 +145,19 @@ function buildQuery(p) {
 }
 
 function copyText(text) {
-  navigator.clipboard.writeText(text).then(() => {
-    // brief feedback
-  });
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).catch(() => _copyFallback(text));
+  } else {
+    _copyFallback(text);
+  }
+}
+
+function _copyFallback(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
 }
 
 function fmtCost(v) {
@@ -704,7 +714,7 @@ function renderDetail(entry) {
         ${entry.estimated_cost ? `<div class="dm-item"><span class="dm-label">成本</span><span class="dm-value cost-value">${fmtCost(entry.estimated_cost)}</span></div>` : ""}
         ${entry.conv_fingerprint ? `<div class="dm-item"><span class="dm-label">会话</span><span class="dm-value"><span class="tc-conv" style="--fp-color:${fpColor(entry.conv_fingerprint)};cursor:pointer" onclick="filterConversation('${esc(entry.conv_fingerprint)}')"><span class="tc-conv-dot"></span>${esc(entry.conv_fingerprint)}</span></span></div>` : ""}
         ${entry.msg_count ? `<div class="dm-item"><span class="dm-label">消息数</span><span class="dm-value">${entry.msg_count}</span></div>` : ""}
-        ${entry.api_key_hash ? `<div class="dm-item"><span class="dm-label">Key Hash</span><span class="dm-value" style="display:flex;align-items:center;gap:6px"><code style="font-size:11px;color:var(--text-muted);font-family:var(--mono)">${esc(entry.api_key_hash.slice(0,12))}…</code><button class="copy-hash-btn" onclick="navigator.clipboard.writeText('${esc(entry.api_key_hash)}').then(()=>{this.textContent='✓';setTimeout(()=>this.textContent='📋',1500)})" title="复制完整 Key Hash">📋</button></span></div>` : ""}
+        ${entry.api_key_hash ? `<div class="dm-item"><span class="dm-label">Key Hash</span><span class="dm-value" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><code style="font-size:11px;color:var(--text-muted);font-family:var(--mono);word-break:break-all">${esc(entry.api_key_hash)}</code><button class="copy-hash-btn" data-hash="${esc(entry.api_key_hash)}" title="复制 Key Hash">📋</button></span></div>` : ""}
       </div>
       <div class="detail-tabs">
         <button class="tab-btn active" data-tab="friendly">友好视图</button>
@@ -788,6 +798,19 @@ function renderDetail(entry) {
       pane.querySelector(`[data-panel="${btn.dataset.tab}"]`).classList.add("active");
       if (btn.dataset.tab === "timeline" && entry.conv_fingerprint) {
         loadTimeline(entry.conv_fingerprint, entry.id);
+      }
+    });
+  });
+
+  // Copy hash button (works over HTTP too)
+  pane.querySelectorAll(".copy-hash-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const hash = btn.dataset.hash;
+      const ok = () => { btn.textContent = '✓'; setTimeout(() => btn.textContent = '📋', 1500); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(hash).then(ok).catch(() => { _copyFallback(hash); ok(); });
+      } else {
+        _copyFallback(hash); ok();
       }
     });
   });
