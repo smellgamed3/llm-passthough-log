@@ -60,6 +60,7 @@
               <form id="searchForm" class="search-bar">
                 <input type="text" name="q" placeholder="搜索 prompt、模型名、内容…" />
                 <button type="submit" class="icon-btn search-btn">⏎</button>
+                <button type="button" id="clearFiltersQuick" class="icon-btn" title="清除所有筛选">✕</button>
                 <button type="button" id="toggleFilters" class="icon-btn" title="高级筛选">⚙</button>
               </form>
               <div id="advancedFilters" class="adv-filters" style="display:none">
@@ -109,6 +110,12 @@
                       <option value="true">流式 ⚡</option>
                       <option value="false">非流式</option>
                     </select>
+                  </div>
+                </div>
+                <div class="filter-group">
+                  <label class="filter-label">会话筛选</label>
+                  <div class="filter-grid">
+                    <input type="text" name="conv_fingerprint" placeholder="会话 ID（conv_fingerprint）" form="searchForm" style="grid-column: 1 / -1" />
                   </div>
                 </div>
                 <div class="filter-actions">

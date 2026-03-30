@@ -458,10 +458,13 @@ function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 /* ── 会话关联筛选 ─────────────────────────────────── */
 
 function filterConversation(fp) {
-  state.filters.q = fp;
+  state.filters.conv_fingerprint = fp;
   state.page = 1;
-  const searchInput = document.querySelector('#searchForm input[name="q"]');
-  if (searchInput) searchInput.value = fp;
+  // Show in the dedicated conv_fingerprint filter input
+  const fpInput = document.querySelector('#searchForm input[name="conv_fingerprint"]');
+  if (fpInput) fpInput.value = fp;
+  // Ensure advanced filters are visible
+  document.getElementById("advancedFilters").style.display = "";
   loadLogs();
 }
 
@@ -628,7 +631,10 @@ document.querySelectorAll(".qdur-btn").forEach(btn => {
 });
 
 /* -- Clear all filters -- */
-document.getElementById("clearFilters").addEventListener("click", () => {
+document.getElementById("clearFilters").addEventListener("click", clearAllFilters);
+document.getElementById("clearFiltersQuick").addEventListener("click", clearAllFilters);
+
+function clearAllFilters() {
   document.getElementById("searchForm").reset();
   document.getElementById("filterTimeFrom").value = "";
   document.getElementById("filterTimeTo").value = "";
@@ -638,7 +644,7 @@ document.getElementById("clearFilters").addEventListener("click", () => {
   state.filters = {};
   state.page = 1;
   loadLogs();
-});
+}
 
 function toLocalISO(d) {
   const off = d.getTimezoneOffset();

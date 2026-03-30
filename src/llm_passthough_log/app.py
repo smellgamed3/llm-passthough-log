@@ -462,6 +462,7 @@ def create_app(
         time_to: Optional[float] = Query(default=None),
         duration_min: Optional[float] = Query(default=None),
         duration_max: Optional[float] = Query(default=None),
+        conv_fingerprint: str = Query(default=""),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=resolved_settings.admin_page_size_default, ge=1),
     ) -> Dict[str, Any]:
@@ -488,6 +489,7 @@ def create_app(
             page=page,
             page_size=bounded_page_size,
             allowed_providers=allowed,
+            conv_fingerprint=conv_fingerprint or None,
         )
         return sanitize_for_web(payload)
 
@@ -746,10 +748,15 @@ def create_app(
         status_val = data.get("status")
         method_val = str(data.get("method", "")).strip()
         stream_val = data.get("stream")
+        if isinstance(stream_val, str):
+            stream_val = stream_val.lower() in ("true", "1")
+        elif stream_val is not None:
+            stream_val = bool(stream_val)
         time_from = data.get("time_from")
         time_to = data.get("time_to")
         duration_min = data.get("duration_min")
         duration_max = data.get("duration_max")
+        conv_fp = str(data.get("conv_fingerprint", "")).strip()
         page = max(int(data.get("page", 1)), 1)
         page_size = min(max(int(data.get("page_size", resolved_settings.admin_page_size_default)), 1),
                         resolved_settings.admin_page_size_max)
@@ -760,7 +767,7 @@ def create_app(
             model=model,
             status=int(status_val) if status_val is not None else None,
             method=method_val,
-            stream=bool(stream_val) if stream_val is not None else None,
+            stream=stream_val,
             path_contains=path_contains,
             time_from=float(time_from) if time_from is not None else None,
             time_to=float(time_to) if time_to is not None else None,
@@ -769,6 +776,7 @@ def create_app(
             page=page,
             page_size=page_size,
             api_key_hashes=key_hashes,
+            conv_fingerprint=conv_fp or None,
         )
         return sanitize_for_web(payload)
 

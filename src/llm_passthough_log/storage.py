@@ -507,6 +507,7 @@ class LogStore:
         page_size: int,
         allowed_providers: Optional[List[str]] = None,
         api_key_hashes: Optional[List[str]] = None,
+        conv_fingerprint: Optional[str] = None,
     ) -> Dict[str, Any]:
         return await asyncio.to_thread(
             self._list_logs_sync,
@@ -525,6 +526,7 @@ class LogStore:
             page_size,
             allowed_providers,
             api_key_hashes,
+            conv_fingerprint,
         )
 
     async def get_log(self, log_id: str) -> Optional[Dict[str, Any]]:
@@ -836,6 +838,7 @@ class LogStore:
         page_size: int,
         allowed_providers: Optional[List[str]] = None,
         api_key_hashes: Optional[List[str]] = None,
+        conv_fingerprint: Optional[str] = None,
     ) -> Dict[str, Any]:
         where: List[str] = []
         params: List[Any] = []
@@ -884,6 +887,9 @@ class LogStore:
         if duration_max is not None:
             where.append("duration_ms <= ?")
             params.append(duration_max)
+        if conv_fingerprint:
+            where.append("conv_fingerprint = ?")
+            params.append(conv_fingerprint)
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         offset = max(page - 1, 0) * page_size
         conn = self._get_read_conn()

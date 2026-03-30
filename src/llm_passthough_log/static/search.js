@@ -553,10 +553,11 @@ async function loadLogs() {
 }
 
 function filterConversation(fp) {
-  state.filters.q = fp;
+  state.filters.conv_fingerprint = fp;
   state.page = 1;
-  const searchInput = document.querySelector('#searchForm input[name="q"]');
-  if (searchInput) searchInput.value = fp;
+  const fpInput = document.querySelector('#searchForm input[name="conv_fingerprint"]');
+  if (fpInput) fpInput.value = fp;
+  document.getElementById("advancedFilters").style.display = "";
   loadLogs();
 }
 
@@ -1189,17 +1190,30 @@ document.querySelectorAll(".qtime-btn").forEach(btn => {
   });
 });
 
-document.getElementById("clearFilters").addEventListener("click", () => {
+document.querySelectorAll(".qdur-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".qdur-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById("filterDurMin").value = btn.dataset.min;
+    document.getElementById("filterDurMax").value = btn.dataset.max;
+    document.getElementById("searchForm").dispatchEvent(new Event("submit", { cancelable: true }));
+  });
+});
+
+document.getElementById("clearFilters").addEventListener("click", clearAllFilters);
+document.getElementById("clearFiltersQuick").addEventListener("click", clearAllFilters);
+
+function clearAllFilters() {
   document.getElementById("searchForm").reset();
   document.getElementById("filterTimeFrom").value = "";
   document.getElementById("filterTimeTo").value = "";
   document.getElementById("filterDurMin").value = "";
   document.getElementById("filterDurMax").value = "";
-  document.querySelectorAll(".qtime-btn.active").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".qtime-btn.active, .qdur-btn.active").forEach(b => b.classList.remove("active"));
   state.filters = {};
   state.page = 1;
   loadLogs();
-});
+}
 
 document.getElementById("refreshLogs").addEventListener("click", () => loadLogs());
 

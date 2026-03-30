@@ -78,6 +78,7 @@
             <form id="searchForm" class="search-bar">
               <input type="text" name="q" placeholder="搜索 prompt、模型名、内容…" />
               <button type="submit" class="icon-btn search-btn">⏎</button>
+              <button type="button" id="clearFiltersQuick" class="icon-btn" title="清除所有筛选">✕</button>
               <button type="button" id="toggleFilters" class="icon-btn" title="高级筛选">⚙</button>
             </form>
             <div id="advancedFilters" class="adv-filters" style="display:none">
@@ -104,12 +105,35 @@
                   <span class="filter-sep">—</span>
                   <input type="number" id="filterDurMax" placeholder="最大" min="0" step="100" />
                 </div>
+                <div class="quick-time-btns">
+                  <button type="button" class="qdur-btn" data-min="0" data-max="1000">&lt;1s</button>
+                  <button type="button" class="qdur-btn" data-min="1000" data-max="5000">1-5s</button>
+                  <button type="button" class="qdur-btn" data-min="5000" data-max="30000">5-30s</button>
+                  <button type="button" class="qdur-btn" data-min="30000" data-max="">&gt;30s</button>
+                  <button type="button" class="qdur-btn" data-min="" data-max="">全部</button>
+                </div>
               </div>
               <div class="filter-group">
                 <label class="filter-label">基本筛选</label>
                 <div class="filter-grid">
                   <input type="text" name="model" placeholder="Model" form="searchForm" />
                   <input type="number" name="status" placeholder="状态码" form="searchForm" />
+                  <select name="method" form="searchForm">
+                    <option value="">全部方法</option>
+                    <option value="GET">GET</option>
+                    <option value="POST">POST</option>
+                  </select>
+                  <select name="stream" form="searchForm">
+                    <option value="">全部类型</option>
+                    <option value="true">流式 ⚡</option>
+                    <option value="false">非流式</option>
+                  </select>
+                </div>
+              </div>
+              <div class="filter-group">
+                <label class="filter-label">会话筛选</label>
+                <div class="filter-grid">
+                  <input type="text" name="conv_fingerprint" placeholder="会话 ID（conv_fingerprint）" form="searchForm" style="grid-column: 1 / -1" />
                 </div>
               </div>
               <div class="filter-actions">
