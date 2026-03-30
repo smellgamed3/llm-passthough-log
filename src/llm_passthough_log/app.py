@@ -137,7 +137,12 @@ def _extract_search_hashes(data: dict) -> list[str]:
     if isinstance(raw_keys, list):
         for k in raw_keys:
             if isinstance(k, str) and k.strip():
-                hashes.append(hash_api_key(k))
+                key = k.strip()
+                # Strip "Bearer " prefix to match how proxy stores the hash
+                if key.lower().startswith("bearer "):
+                    key = key[7:].strip()
+                if key:
+                    hashes.append(hash_api_key(key))
     return list(dict.fromkeys(hashes))  # deduplicate, preserve order
 
 

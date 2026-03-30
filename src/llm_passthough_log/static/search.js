@@ -153,7 +153,14 @@ function loadKeysFromStorage() {
         migrated.push({ id: k.id || generateId(), hash: null, label: k.label || "", active: k.active !== false, count: k.count ?? null, _rawKey: k.key });
       }
     }
-    state.keys = migrated;
+    // Deduplicate by hash (safety: prevent ghost duplicates)
+    const seen = new Set();
+    state.keys = migrated.filter(k => {
+      if (!k.hash) return true; // keep null-hash entries (pending migration)
+      if (seen.has(k.hash)) return false;
+      seen.add(k.hash);
+      return true;
+    });
     if (needsSave) migrateOldKeys();
   } catch { state.keys = []; }
 }
@@ -289,7 +296,9 @@ async function sha256(text) {
   // Pre-processing: padding
   const padded=[...data,0x80];
   while(padded.length%64!==56) padded.push(0);
-  for(let i=7;i>=0;i--) padded.push((bl>>>(i*8))&0xff);
+  // Append 64-bit big-endian bit length (high 32 bits always 0 for practical inputs)
+  padded.push(0, 0, 0, 0);
+  padded.push((bl >>> 24) & 0xff, (bl >>> 16) & 0xff, (bl >>> 8) & 0xff, bl & 0xff);
   // Process each 512-bit (64-byte) block
   for(let off=0;off<padded.length;off+=64){
     const W=new Array(64);
@@ -329,8 +338,12 @@ document.getElementById("addKeyBtn").addEventListener("click", async () => {
     }
     hash = raw.toLowerCase();
   } else {
-    // Raw key → hash client-side
-    hash = await sha256(raw);
+    // Raw key → hash client-side (strip "Bearer " prefix to match backend)
+    let keyToHash = raw;
+    if (keyToHash.toLowerCase().startsWith("bearer ")) {
+      keyToHash = keyToHash.slice(7).trim();
+    }
+    hash = await sha256(keyToHash);
   }
 
   // Check duplicate
@@ -390,7 +403,9 @@ document.getElementById("keyList").addEventListener("click", (e) => {
   const delBtn = e.target.closest("[data-del]");
   if (delBtn) {
     const kid = delBtn.dataset.del;
-    state.keys = state.keys.filter(x => x.id !== kid);
+    const delKey = state.keys.find(x => x.id === kid);
+    // Remove by ID, and also clean up any entries with the same hash (dedup safety)
+    state.keys = state.keys.filter(x => x.id !== kid && !(delKey && delKey.hash && x.hash === delKey.hash));
     saveKeysToStorage();
     renderKeyList();
     if (getActiveKeyHashes().length > 0) loadLogs();

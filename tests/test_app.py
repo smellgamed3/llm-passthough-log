@@ -1022,6 +1022,63 @@ def test_extract_search_hashes_whitespace_keys():
     assert len(result) == 1
 
 
+def test_extract_search_hashes_strips_bearer_prefix():
+    """raw key 带 Bearer 前缀时应自动去除后再 hash"""
+    from llm_passthough_log.app import _extract_search_hashes
+    from llm_passthough_log.storage import hash_api_key
+
+    raw_key = "sk-test-bearer-prefix"
+    expected_hash = hash_api_key(raw_key)
+
+    # With "Bearer " prefix
+    result = _extract_search_hashes({"keys": [f"Bearer {raw_key}"]})
+    assert result == [expected_hash]
+
+    # With "bearer " lowercase prefix
+    result = _extract_search_hashes({"keys": [f"bearer {raw_key}"]})
+    assert result == [expected_hash]
+
+    # Without prefix
+    result = _extract_search_hashes({"keys": [raw_key]})
+    assert result == [expected_hash]
+
+
+def test_search_verify_keys_with_bearer_prefixed_key(tmp_path):
+    """verify-keys 接收带 Bearer 前缀的原始 key 应正确匹配"""
+    raw_key = "sk-test-bearer-verify"
+    app, key_hash = _make_app_with_logged_request(tmp_path, api_key=raw_key)
+    with TestClient(app) as client:
+        # Search with "Bearer <key>" should match the same records as raw key
+        resp = client.post("/search/api/verify-keys", json={"keys": [f"Bearer {raw_key}"]})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert key_hash in data["keys"]
+        assert data["keys"][key_hash]["count"] >= 1
+
+
+def test_search_logs_with_bearer_prefixed_key(tmp_path):
+    """search/api/logs 传入带 Bearer 前缀的 key 应能查到记录"""
+    raw_key = "sk-test-bearer-search"
+    app, key_hash = _make_app_with_logged_request(tmp_path, api_key=raw_key)
+    with TestClient(app) as client:
+        resp = client.post("/search/api/logs", json={"keys": [f"Bearer {raw_key}"]})
+        assert resp.status_code == 200
+        assert resp.json()["pagination"]["total"] >= 1
+
+
+def test_hash_api_key_consistency():
+    """hash_api_key 对相同输入应始终返回相同结果"""
+    from llm_passthough_log.storage import hash_api_key
+    key = "sk-consistency-test-key"
+    h1 = hash_api_key(key)
+    h2 = hash_api_key(key)
+    assert h1 == h2
+    assert len(h1) == 64
+    # Different key should produce different hash
+    h3 = hash_api_key("sk-different-key")
+    assert h1 != h3
+
+
 # ════════════════ Admin Log Filters ════════════════
 
 
