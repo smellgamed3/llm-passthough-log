@@ -455,7 +455,14 @@ body {
   line-height: 1.6;
 }
 
-/* ── Main area (traces layout) ────────────────────── */
+/* ── Main area ────────────────────────────────────── */
+
+.main-area {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
 
 .traces-layout {
   display: flex;
@@ -1449,6 +1456,21 @@ body {
 
 .pager button:disabled { opacity: 0.3; cursor: default; }
 .pager button:hover:not(:disabled) { background: var(--bg-hover); }
+
+.page-size-select {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  font-size: 11px;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+
+.page-size-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 
 /* ── Generic form elements ────────────────────────── */
 

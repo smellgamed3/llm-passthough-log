@@ -5,6 +5,7 @@
 const state = {
   page: 1,
   pages: 1,
+  pageSize: 20,
   filters: {},
   pathFilter: "chat/completions",
   selectedTraceId: null,
@@ -503,6 +504,7 @@ async function loadLogs() {
     ...state.filters,
     path_contains: state.pathFilter,
     page: state.page,
+    page_size: state.pageSize,
   };
 
   try {
@@ -1235,6 +1237,11 @@ document.getElementById("prevPage").addEventListener("click", () => {
 });
 document.getElementById("nextPage").addEventListener("click", () => {
   if (state.page < state.pages) { state.page++; loadLogs(); }
+});
+document.getElementById("pageSize").addEventListener("change", (e) => {
+  state.pageSize = parseInt(e.target.value, 10);
+  state.page = 1;
+  loadLogs();
 });
 
 /* ── Init ─────────────────────────────────────────── */

@@ -5,6 +5,7 @@
 const state = {
   page: 1,
   pages: 1,
+  pageSize: 20,
   filters: {},
   activeTab: "friendly",
   detailEntry: null,
@@ -521,7 +522,7 @@ document.getElementById("btnReanalyze").addEventListener("click", async () => {
 /* ── Trace 列表 ───────────────────────────────────── */
 
 async function loadLogs() {
-  const q = buildQuery({ ...state.filters, path_contains: state.pathFilter, page: state.page });
+  const q = buildQuery({ ...state.filters, path_contains: state.pathFilter, page: state.page, page_size: state.pageSize });
   const p = await fetchJSON(`/admin/api/logs?${q}`);
   const { items, pagination } = p;
   state.pages = pagination.pages;
@@ -676,6 +677,11 @@ document.getElementById("prevPage").addEventListener("click", () => {
 });
 document.getElementById("nextPage").addEventListener("click", () => {
   if (state.page < state.pages) { state.page++; loadLogs(); }
+});
+document.getElementById("pageSize").addEventListener("change", (e) => {
+  state.pageSize = parseInt(e.target.value, 10);
+  state.page = 1;
+  loadLogs();
 });
 
 /* ── Trace 详情渲染 ───────────────────────────────── */
