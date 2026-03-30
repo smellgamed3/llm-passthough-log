@@ -31,13 +31,21 @@
           <div class="key-header-right">
             <button id="selectAllKeys" class="ghost btn-sm">全选</button>
             <button id="deselectAllKeys" class="ghost btn-sm">全不选</button>
+            <button id="clearAllData" class="ghost btn-sm btn-danger" title="清除所有本地缓存数据">清理缓存</button>
           </div>
         </div>
         <div id="keyPanelBody" class="key-panel-body">
           <div class="key-add-row">
+            <div class="key-input-mode">
+              <button class="mode-btn active" data-mode="key" id="modeKeyBtn">原始 Key</button>
+              <button class="mode-btn" data-mode="hash" id="modeHashBtn">Key Hash</button>
+            </div>
             <input type="text" id="newKeyInput" placeholder="输入 API Key（如 sk-xxxxx）" autocomplete="off" />
-            <input type="text" id="newKeyLabel" placeholder="别名（可选，方便区分）" autocomplete="off" />
+            <input type="text" id="newKeyLabel" placeholder="别名（可选）" autocomplete="off" />
             <button id="addKeyBtn" class="btn-primary">添加</button>
+          </div>
+          <div class="key-security-note" id="keySecurityNote">
+            🔒 Key 仅以 SHA-256 哈希形式存储在浏览器本地，原始 Key 不会被保留。您也可以切换到「Key Hash」模式直接粘贴哈希值。
           </div>
           <div id="keyList" class="key-list">
             <!-- key items rendered here -->

@@ -54,8 +54,11 @@ PROVIDER_ROUTES_JSON='{"openai":"https://api.openai.com","claude":"https://api.a
 - **Key 管理**：页面顶部支持添加多个 API Key，可设置别名、快速切换、多选合并查看
 - **权限隔离**：仅展示与用户提供的 API Key 匹配的记录，无法查看其他人的数据
 - **内容限制**：仅可查看 LLM 对话和 Embeddings 两类记录
-- **Key 脱敏**：页面上 API Key 始终脱敏显示（如 `sk-xxxx…abcd`）
-- **友好视图**：默认 Tab 展示 Token 用量分析、Prompt 构成明细、Completion 构成明细、请求参数，与管理台一致
+- **Key Hash 存储**：Key 仅以 SHA-256 哈希形式存储在浏览器本地，原始 Key 不会被保留
+- **Hash 模式**：支持直接粘贴 Key Hash 配置，用户可复制哈希存储复用，比裸 Key 更安全
+- **Key 脱敏**：页面上仅显示 Hash 前缀（如 `a1b2c3d4…ef01`）
+- **友好视图**：默认 Tab 展示 Token 用量分析、Prompt/Completion 构成明细、请求参数
+- **缓存管理**：一键清理本地存储数据
 - **额外特性**：每个 Key 分配独立颜色标识、支持内联编辑别名、面板可折叠
 
 技术实现：代理转发时从请求的 `Authorization` 头提取原始 Bearer Token，计算 SHA-256 哈希存入 `api_key_hash` 字段。搜索页 POST 提交原始 Key，后端哈希后匹配，不暴露哈希值给客户端。
@@ -103,5 +106,5 @@ uv run pytest
 
 ## 版本
 
-- 当前版本：`1.1.0`
-- 最新标签：`v1.1.0`
+- 当前版本：`1.2.0`
+- 最新标签：`v1.2.0`

@@ -210,8 +210,79 @@ body {
 }
 
 .key-add-row input::placeholder { color: var(--text-muted); }
-.key-add-row input:first-child { flex: 1; min-width: 0; }
-.key-add-row input:nth-child(2) { width: 160px; }
+.key-add-row input:first-of-type { flex: 1; min-width: 0; }
+.key-add-row input:nth-of-type(2) { width: 140px; }
+
+.key-input-mode {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.mode-btn {
+  font-size: 11px;
+  padding: 5px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 100ms;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.mode-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.mode-btn:hover:not(.active) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.key-security-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 15%, transparent);
+  border-radius: var(--radius);
+  line-height: 1.5;
+}
+
+.btn-danger {
+  color: var(--red) !important;
+  border-color: color-mix(in srgb, var(--red) 30%, transparent) !important;
+}
+
+.btn-danger:hover {
+  background: var(--red-soft) !important;
+}
+
+.key-copy-btn {
+  border: none !important;
+  background: none !important;
+  color: var(--text-muted) !important;
+  font-size: 12px !important;
+  padding: 0 3px !important;
+  cursor: pointer;
+  line-height: 1;
+  transition: color 100ms;
+  opacity: 0;
+}
+
+.key-item:hover .key-copy-btn {
+  opacity: 1;
+}
+
+.key-copy-btn:hover {
+  color: var(--accent) !important;
+}
 
 .key-list {
   display: flex;

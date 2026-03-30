@@ -501,6 +501,21 @@ body.role-admin .admin-only { display: revert; }
 .dm-value.ok { color: var(--green); }
 .dm-value.err { color: var(--red); }
 
+.copy-hash-btn {
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: background 100ms;
+  color: var(--text-muted);
+}
+.copy-hash-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
 /* ── Tab 导航 ─────────────────────────────────────── */
 
 .detail-tabs {

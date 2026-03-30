@@ -704,6 +704,7 @@ function renderDetail(entry) {
         ${entry.estimated_cost ? `<div class="dm-item"><span class="dm-label">成本</span><span class="dm-value cost-value">${fmtCost(entry.estimated_cost)}</span></div>` : ""}
         ${entry.conv_fingerprint ? `<div class="dm-item"><span class="dm-label">会话</span><span class="dm-value"><span class="tc-conv" style="--fp-color:${fpColor(entry.conv_fingerprint)};cursor:pointer" onclick="filterConversation('${esc(entry.conv_fingerprint)}')"><span class="tc-conv-dot"></span>${esc(entry.conv_fingerprint)}</span></span></div>` : ""}
         ${entry.msg_count ? `<div class="dm-item"><span class="dm-label">消息数</span><span class="dm-value">${entry.msg_count}</span></div>` : ""}
+        ${entry.api_key_hash ? `<div class="dm-item"><span class="dm-label">Key Hash</span><span class="dm-value" style="display:flex;align-items:center;gap:6px"><code style="font-size:11px;color:var(--text-muted);font-family:var(--mono)">${esc(entry.api_key_hash.slice(0,12))}…</code><button class="copy-hash-btn" onclick="navigator.clipboard.writeText('${esc(entry.api_key_hash)}').then(()=>{this.textContent='✓';setTimeout(()=>this.textContent='📋',1500)})" title="复制完整 Key Hash">📋</button></span></div>` : ""}
       </div>
       <div class="detail-tabs">
         <button class="tab-btn active" data-tab="friendly">友好视图</button>

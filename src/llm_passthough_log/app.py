@@ -108,6 +108,32 @@ def sanitize_string_for_web(value: str, key_name: Optional[str] = None) -> str:
     return SK_TOKEN_RE.sub(lambda match: mask_secret(match.group(0)), masked)
 
 
+import re as _re
+
+_SHA256_HEX_RE = _re.compile(r'^[0-9a-f]{64}$')
+
+
+def _extract_search_hashes(data: dict) -> list[str]:
+    """Extract key hashes from search request data.
+
+    Accepts ``key_hashes`` (pre-computed SHA-256 hex) or ``keys`` (raw, hashed
+    server-side).  Returns a deduplicated list of hex hashes.
+    """
+    hashes: list[str] = []
+    raw_hashes = data.get("key_hashes", [])
+    if isinstance(raw_hashes, list):
+        for h in raw_hashes:
+            h = str(h).strip().lower()
+            if _SHA256_HEX_RE.match(h):
+                hashes.append(h)
+    raw_keys = data.get("keys", [])
+    if isinstance(raw_keys, list):
+        for k in raw_keys:
+            if isinstance(k, str) and k.strip():
+                hashes.append(hash_api_key(k))
+    return list(dict.fromkeys(hashes))  # deduplicate, preserve order
+
+
 def sanitize_for_web(value: Any, *, key_name: Optional[str] = None) -> Any:
     if isinstance(value, dict):
         return {key: sanitize_for_web(item, key_name=key) for key, item in value.items()}
@@ -686,36 +712,26 @@ def create_app(
 
     @app.post("/search/api/verify-keys", include_in_schema=False)
     async def search_verify_keys(request: Request) -> Dict[str, Any]:
-        """Verify API keys and return per-key record counts."""
+        """Verify API keys / key hashes and return per-hash record counts."""
         data = await request.json()
-        keys = data.get("keys", [])
-        if not isinstance(keys, list) or not keys:
-            raise HTTPException(status_code=422, detail="'keys' must be a non-empty list")
-        if len(keys) > 50:
+        hashes = _extract_search_hashes(data)
+        if not hashes:
+            raise HTTPException(status_code=422, detail="no valid keys or key_hashes provided")
+        if len(hashes) > 50:
             raise HTTPException(status_code=422, detail="too many keys (max 50)")
-        key_hashes = {hash_api_key(k): k for k in keys if isinstance(k, str) and k.strip()}
-        if not key_hashes:
-            raise HTTPException(status_code=422, detail="no valid keys provided")
-        counts = await runtime.log_store.verify_api_key_hashes(list(key_hashes.keys()))
-        # Return masked key -> count mapping
+        counts = await runtime.log_store.verify_api_key_hashes(hashes)
         results = {}
-        for kh, raw_key in key_hashes.items():
-            results[kh] = {
-                "count": counts.get(kh, 0),
-                "masked_key": mask_secret(raw_key),
-            }
+        for kh in hashes:
+            results[kh] = {"count": counts.get(kh, 0)}
         return {"keys": results}
 
     @app.post("/search/api/logs", include_in_schema=False)
     async def search_logs(request: Request) -> Dict[str, Any]:
-        """Search logs filtered by API keys. Non-admin can only see chat/completions and embeddings."""
+        """Search logs filtered by API keys/hashes. Non-admin: chat/completions + embeddings only."""
         data = await request.json()
-        keys = data.get("keys", [])
-        if not isinstance(keys, list) or not keys:
-            raise HTTPException(status_code=422, detail="at least one API key is required")
-        key_hashes = [hash_api_key(k) for k in keys if isinstance(k, str) and k.strip()]
+        key_hashes = _extract_search_hashes(data)
         if not key_hashes:
-            raise HTTPException(status_code=422, detail="no valid keys provided")
+            raise HTTPException(status_code=422, detail="at least one API key or key_hash is required")
 
         # For non-admin search, restrict path to chat/completions and embeddings
         path_contains = str(data.get("path_contains", "")).strip()
@@ -760,12 +776,9 @@ def create_app(
     async def search_log_detail(log_id: str, request: Request) -> Dict[str, Any]:
         """Get log detail, verifying API key ownership."""
         data = await request.json()
-        keys = data.get("keys", [])
-        if not isinstance(keys, list) or not keys:
-            raise HTTPException(status_code=422, detail="at least one API key is required")
-        key_hashes = [hash_api_key(k) for k in keys if isinstance(k, str) and k.strip()]
+        key_hashes = _extract_search_hashes(data)
         if not key_hashes:
-            raise HTTPException(status_code=422, detail="no valid keys provided")
+            raise HTTPException(status_code=422, detail="at least one API key or key_hash is required")
 
         log_entry = await runtime.log_store.get_log_with_key_check(log_id, key_hashes)
         if log_entry is None:
@@ -774,14 +787,11 @@ def create_app(
 
     @app.post("/search/api/conversation/{fingerprint}", include_in_schema=False)
     async def search_conversation_timeline(fingerprint: str, request: Request) -> Dict[str, Any]:
-        """Get conversation timeline filtered by API keys."""
+        """Get conversation timeline filtered by API keys/hashes."""
         data = await request.json()
-        keys = data.get("keys", [])
-        if not isinstance(keys, list) or not keys:
-            raise HTTPException(status_code=422, detail="at least one API key is required")
-        key_hashes = [hash_api_key(k) for k in keys if isinstance(k, str) and k.strip()]
+        key_hashes = _extract_search_hashes(data)
         if not key_hashes:
-            raise HTTPException(status_code=422, detail="no valid keys provided")
+            raise HTTPException(status_code=422, detail="at least one API key or key_hash is required")
 
         items = await runtime.log_store.list_conversation_logs(
             fingerprint, api_key_hashes=key_hashes

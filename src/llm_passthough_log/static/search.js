@@ -9,8 +9,9 @@ const state = {
   pathFilter: "chat/completions",
   selectedTraceId: null,
   detailEntry: null,
-  // Key management - stored in localStorage
-  keys: [], // [{id, key, label, active, maskedKey}]
+  inputMode: "key", // "key" or "hash"
+  // Key management - stored in localStorage as hashes only
+  keys: [], // [{id, hash, label, active, count}]
 };
 
 const STORAGE_KEY = "llm_search_api_keys";
@@ -111,19 +112,58 @@ function sanitizeDisplayData(value, keyName) {
 
 /* ── Key Management ───────────────────────────────── */
 
+function isValidHash(s) {
+  return /^[0-9a-f]{64}$/.test(s);
+}
+
 function loadKeysFromStorage() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) state.keys = JSON.parse(raw);
+    if (!raw) { state.keys = []; return; }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) { state.keys = []; return; }
+    // Migration: convert old format (raw key stored) to hash-only format
+    const migrated = [];
+    let needsSave = false;
+    for (const k of parsed) {
+      if (k.hash && isValidHash(k.hash)) {
+        // Already new format
+        migrated.push({ id: k.id, hash: k.hash, label: k.label || "", active: k.active !== false, count: k.count ?? null });
+      } else if (k.key && typeof k.key === "string") {
+        // Old format: has raw key, needs migration (async, will save after)
+        needsSave = true;
+        migrated.push({ id: k.id || generateId(), hash: null, label: k.label || "", active: k.active !== false, count: k.count ?? null, _rawKey: k.key });
+      }
+    }
+    state.keys = migrated;
+    if (needsSave) migrateOldKeys();
   } catch { state.keys = []; }
 }
 
-function saveKeysToStorage() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.keys));
+async function migrateOldKeys() {
+  let changed = false;
+  for (const k of state.keys) {
+    if (k._rawKey) {
+      k.hash = await sha256(k._rawKey);
+      delete k._rawKey;
+      changed = true;
+    }
+  }
+  if (changed) { saveKeysToStorage(); renderKeyList(); }
 }
 
-function getActiveKeys() {
-  return state.keys.filter(k => k.active).map(k => k.key);
+function saveKeysToStorage() {
+  const data = state.keys.map(k => ({ id: k.id, hash: k.hash, label: k.label, active: k.active, count: k.count }));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+}
+
+function getActiveKeyHashes() {
+  return state.keys.filter(k => k.active && k.hash).map(k => k.hash);
+}
+
+function maskHash(hash) {
+  if (!hash) return "—";
+  return hash.slice(0, 8) + "…" + hash.slice(-4);
 }
 
 const KEY_COLORS = [
@@ -142,8 +182,8 @@ function renderKeyList() {
   } else {
     list.innerHTML = state.keys.map((k, idx) => {
       const color = keyColor(idx);
-      const displayName = k.label ? esc(k.label) : esc(k.maskedKey || maskKeyDisplay(k.key));
-      const subtitle = k.label ? esc(k.maskedKey || maskKeyDisplay(k.key)) : '';
+      const displayName = k.label ? esc(k.label) : esc(maskHash(k.hash));
+      const subtitle = k.label ? esc(maskHash(k.hash)) : '';
       const countText = k.count != null ? k.count + ' 条' : '';
       return `
       <div class="key-item ${k.active ? 'active' : 'inactive'}" data-kid="${k.id}" style="--key-color:${color}">
@@ -154,12 +194,13 @@ function renderKeyList() {
         <span class="key-display-name" data-kid-name="${k.id}">${displayName}</span>
         ${subtitle ? `<span class="key-subtitle">${subtitle}</span>` : ''}
         ${countText ? `<span class="key-count">${countText}</span>` : ''}
+        <button class="key-copy-btn" data-copy="${k.id}" title="复制 Key Hash" onclick="event.stopPropagation()">📋</button>
         <button class="key-edit-btn" data-edit="${k.id}" title="编辑别名" onclick="event.stopPropagation()">✎</button>
         <button class="key-del-btn" data-del="${k.id}" title="删除" onclick="event.stopPropagation()">✕</button>
       </div>`;
     }).join("");
   }
-  document.getElementById("activeKeyCount").textContent = getActiveKeys().length;
+  document.getElementById("activeKeyCount").textContent = getActiveKeyHashes().length;
   updateKeySummary();
   updateMainVisibility();
 }
@@ -179,45 +220,26 @@ function updateKeySummary() {
 }
 
 function updateMainVisibility() {
-  const hasActiveKeys = getActiveKeys().length > 0;
+  const hasActiveKeys = getActiveKeyHashes().length > 0;
   document.getElementById("noKeyOverlay").style.display = hasActiveKeys ? "none" : "";
   document.getElementById("mainArea").style.display = hasActiveKeys ? "" : "none";
 }
 
 async function verifyKeys() {
-  const activeKeys = getActiveKeys();
-  if (!activeKeys.length) return;
+  const hashes = getActiveKeyHashes();
+  if (!hashes.length) return;
   try {
     const resp = await fetch("/search/api/verify-keys", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ keys: activeKeys }),
+      body: JSON.stringify({ key_hashes: hashes }),
     });
     if (!resp.ok) return;
     const data = await resp.json();
-    // Update counts
     if (data.keys) {
       for (const k of state.keys) {
-        // Find hash matching this key
-        for (const [hash, info] of Object.entries(data.keys)) {
-          if (info.masked_key === maskSecretText(k.key) || k.maskedKey === info.masked_key) {
-            k.count = info.count;
-          }
-        }
-      }
-      // Simpler approach: verify by index
-      const keyToHash = {};
-      for (const [hash, info] of Object.entries(data.keys)) {
-        // We can match by the masked key pattern
-        for (const k of state.keys) {
-          if (k.active) {
-            // SHA-256 hash of key
-            const testHash = await sha256(k.key);
-            if (testHash === hash) {
-              k.count = info.count;
-              k.maskedKey = info.masked_key;
-            }
-          }
+        if (k.hash && data.keys[k.hash]) {
+          k.count = data.keys[k.hash].count;
         }
       }
       saveKeysToStorage();
@@ -233,22 +255,35 @@ async function sha256(text) {
   return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// Add key
-document.getElementById("addKeyBtn").addEventListener("click", () => {
+// Add key (raw key or hash depending on mode)
+document.getElementById("addKeyBtn").addEventListener("click", async () => {
   const keyInput = document.getElementById("newKeyInput");
   const labelInput = document.getElementById("newKeyLabel");
-  const key = keyInput.value.trim();
-  if (!key) { keyInput.focus(); return; }
-  // Check duplicate
-  if (state.keys.some(k => k.key === key)) {
-    alert("该 Key 已存在"); return;
+  const raw = keyInput.value.trim();
+  if (!raw) { keyInput.focus(); return; }
+
+  let hash;
+  if (state.inputMode === "hash") {
+    // Direct hash input
+    if (!isValidHash(raw.toLowerCase())) {
+      alert("无效的 SHA-256 哈希（需要 64 位十六进制字符串）"); return;
+    }
+    hash = raw.toLowerCase();
+  } else {
+    // Raw key → hash client-side
+    hash = await sha256(raw);
   }
+
+  // Check duplicate
+  if (state.keys.some(k => k.hash === hash)) {
+    alert("该 Key（Hash）已存在"); return;
+  }
+
   state.keys.push({
     id: generateId(),
-    key: key,
+    hash: hash,
     label: labelInput.value.trim(),
     active: true,
-    maskedKey: maskKeyDisplay(key),
     count: null,
   });
   keyInput.value = "";
@@ -256,7 +291,7 @@ document.getElementById("addKeyBtn").addEventListener("click", () => {
   saveKeysToStorage();
   renderKeyList();
   verifyKeys().then(() => {
-    if (getActiveKeys().length > 0) loadLogs();
+    if (getActiveKeyHashes().length > 0) loadLogs();
   });
 });
 
@@ -264,14 +299,27 @@ document.getElementById("newKeyInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); document.getElementById("addKeyBtn").click(); }
 });
 
-// Toggle / Delete / Edit keys
+// Toggle / Delete / Edit / Copy keys
 document.getElementById("keyList").addEventListener("click", (e) => {
   // Checkbox toggle
   const toggleCb = e.target.closest("[data-toggle]");
   if (toggleCb) {
     const kid = toggleCb.dataset.toggle;
     const k = state.keys.find(x => x.id === kid);
-    if (k) { k.active = toggleCb.checked; saveKeysToStorage(); renderKeyList(); if (getActiveKeys().length > 0) loadLogs(); }
+    if (k) { k.active = toggleCb.checked; saveKeysToStorage(); renderKeyList(); if (getActiveKeyHashes().length > 0) loadLogs(); }
+    return;
+  }
+  // Copy hash
+  const copyBtn = e.target.closest("[data-copy]");
+  if (copyBtn) {
+    const kid = copyBtn.dataset.copy;
+    const k = state.keys.find(x => x.id === kid);
+    if (k && k.hash) {
+      navigator.clipboard.writeText(k.hash).then(() => {
+        copyBtn.textContent = "✓";
+        setTimeout(() => { copyBtn.textContent = "📋"; }, 1500);
+      });
+    }
     return;
   }
   // Edit alias
@@ -287,7 +335,7 @@ document.getElementById("keyList").addEventListener("click", (e) => {
     state.keys = state.keys.filter(x => x.id !== kid);
     saveKeysToStorage();
     renderKeyList();
-    if (getActiveKeys().length > 0) loadLogs();
+    if (getActiveKeyHashes().length > 0) loadLogs();
     return;
   }
   // Click on card body to toggle
@@ -295,7 +343,7 @@ document.getElementById("keyList").addEventListener("click", (e) => {
   if (card && !e.target.closest("input, button, .key-edit-inline")) {
     const kid = card.dataset.kid;
     const k = state.keys.find(x => x.id === kid);
-    if (k) { k.active = !k.active; saveKeysToStorage(); renderKeyList(); if (getActiveKeys().length > 0) loadLogs(); }
+    if (k) { k.active = !k.active; saveKeysToStorage(); renderKeyList(); if (getActiveKeyHashes().length > 0) loadLogs(); }
   }
 });
 
@@ -329,12 +377,35 @@ function startEditLabel(kid) {
 document.getElementById("selectAllKeys").addEventListener("click", () => {
   state.keys.forEach(k => k.active = true);
   saveKeysToStorage(); renderKeyList();
-  if (getActiveKeys().length > 0) loadLogs();
+  if (getActiveKeyHashes().length > 0) loadLogs();
 });
 
 document.getElementById("deselectAllKeys").addEventListener("click", () => {
   state.keys.forEach(k => k.active = false);
   saveKeysToStorage(); renderKeyList();
+});
+
+// Input mode toggle
+document.getElementById("modeKeyBtn").addEventListener("click", () => {
+  state.inputMode = "key";
+  document.getElementById("modeKeyBtn").classList.add("active");
+  document.getElementById("modeHashBtn").classList.remove("active");
+  document.getElementById("newKeyInput").placeholder = "输入 API Key（如 sk-xxxxx）";
+});
+
+document.getElementById("modeHashBtn").addEventListener("click", () => {
+  state.inputMode = "hash";
+  document.getElementById("modeHashBtn").classList.add("active");
+  document.getElementById("modeKeyBtn").classList.remove("active");
+  document.getElementById("newKeyInput").placeholder = "输入 SHA-256 Hash（64 位十六进制）";
+});
+
+// Clear all local data
+document.getElementById("clearAllData").addEventListener("click", () => {
+  if (!confirm("确定要清除所有本地存储的 Key 数据？此操作不可恢复。")) return;
+  localStorage.removeItem(STORAGE_KEY);
+  state.keys = [];
+  renderKeyList();
 });
 
 // Collapse/expand key panel
@@ -350,7 +421,7 @@ document.getElementById("toggleKeyPanel").addEventListener("click", () => {
 /* ── API calls ────────────────────────────────────── */
 
 async function fetchSearchAPI(url, body) {
-  body.keys = getActiveKeys();
+  body.key_hashes = getActiveKeyHashes();
   const r = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -368,8 +439,8 @@ async function fetchSearchAPI(url, body) {
 /* ── Log list ─────────────────────────────────────── */
 
 async function loadLogs() {
-  const activeKeys = getActiveKeys();
-  if (!activeKeys.length) return;
+  const activeHashes = getActiveKeyHashes();
+  if (!activeHashes.length) return;
 
   const body = {
     ...state.filters,
@@ -1099,7 +1170,7 @@ document.getElementById("nextPage").addEventListener("click", () => {
 
 loadKeysFromStorage();
 renderKeyList();
-if (getActiveKeys().length > 0) {
+if (getActiveKeyHashes().length > 0) {
   verifyKeys();
   loadLogs();
 }
