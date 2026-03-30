@@ -290,6 +290,22 @@ function applyRole(role) {
       btn.style.display = "";
     }
   });
+  // Non-admin: restrict category bar to LLM 对话 and Embeddings
+  if (role !== "admin") {
+    document.querySelectorAll("#categoryBar .cat-btn").forEach(btn => {
+      const p = btn.dataset.path;
+      if (p !== "chat/completions" && p !== "embeddings") {
+        btn.style.display = "none";
+      }
+    });
+    // Force default to chat/completions if current filter is not allowed
+    if (state.pathFilter !== "chat/completions" && state.pathFilter !== "embeddings") {
+      state.pathFilter = "chat/completions";
+      document.querySelectorAll("#categoryBar .cat-btn").forEach(b => b.classList.remove("active"));
+      const defaultBtn = document.querySelector('#categoryBar .cat-btn[data-path="chat/completions"]');
+      if (defaultBtn) defaultBtn.classList.add("active");
+    }
+  }
 }
 
 document.getElementById("loginSubmitBtn").addEventListener("click", async () => {

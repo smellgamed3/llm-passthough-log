@@ -5,12 +5,11 @@
 - 原样转发任意 HTTP 请求到下游 LLM Provider
 - 完整记录请求、响应、SSE 流式返回、错误信息
 - 管理后台强制账号密码登录，管理员账号仅可通过 `.env` 指定
-- JSONL 原始日志落盘
-- SQLite 索引，支持管理后台检索与统计
-- 自动为流式聊天请求补充 `stream_options.include_usage=true`，恢复 token 用量可视化
-- 入库阶段自动完成 Token 结构分析（prompt 按角色、completion 按类别）并持久化
-- 支持基于新规则批量重分析历史记录（管理台一键触发）
-- 多轮对话关联：自动识别同一会话的请求并在 UI 中可视化
+- **公开搜索页面**：无需登录，通过 API Key 识别身份，仅查看自己 Key 关联的记录
+- JSONL 原始日志落盘 + SQLite 索引检索
+- 自动为流式请求补充 `stream_options.include_usage=true`
+- Token 结构分析（prompt 按角色、completion 按类别）+ 批量重分析
+- 多轮对话关联 + 会话时间线可视化
 - 敏感信息脱敏：API Key、Bearer Token、下游 URL 域名等全链路自动脱敏
 - 基于 uv 的 Python 项目管理
 
@@ -45,39 +44,47 @@ PROVIDER_ROUTES_JSON='{"openai":"https://api.openai.com","claude":"https://api.a
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD` 必填，且管理员只能通过 `.env` 手动维护
 - web 管理台仅允许 admin 创建、编辑、删除普通用户
 - 普通用户通过账号密码登录后，只能查看自己被授权的 provider 数据
+- 非 admin 用户在管理台只能查看 LLM 对话和 Embeddings 两类记录
+
+## 公开搜索页面 (`/search`)
+
+项目提供一个无需登录的公开搜索入口，任何人可以通过提供 API Key 来查看与该 Key 关联的日志记录：
+
+- **访问地址**：`http://127.0.0.1:8000/search`
+- **Key 管理**：页面顶部支持添加多个 API Key，可设置别名、快速切换、多选合并查看
+- **权限隔离**：仅展示与用户提供的 API Key 匹配的记录，无法查看其他人的数据
+- **内容限制**：仅可查看 LLM 对话和 Embeddings 两类记录
+- **Key 脱敏**：页面上 API Key 始终脱敏显示（如 `sk-xxxx…abcd`）
+- **额外特性**：每个 Key 分配独立颜色标识、支持内联编辑别名、面板可折叠
+
+技术实现：代理转发时从请求的 `Authorization` 头提取原始 Bearer Token，计算 SHA-256 哈希存入 `api_key_hash` 字段。搜索页 POST 提交原始 Key，后端哈希后匹配，不暴露哈希值给客户端。
 
 ## Token 用量可视化
 
-- 对于流式请求，代理会自动补齐 `stream_options.include_usage=true`，便于记录 provider 返回的官方 token 用量
-- 日志入库时会进行 `token_analysis`：
-	- prompt 按常见消息来源拆分：`system`、`user`、`assistant`、`tool`、`tools_schema`
-	- completion 按输出类别拆分：`text_output`、`reasoning`、`tool_calls`
-- 当 provider 返回真实 `usage` 时，面板优先展示真实总量，并按结构分析结果做比例映射展示
-- 对于历史日志或 provider 未返回 `usage` 的场景，详情页会展示估算版 token 面板，便于快速做 prompt 优化
-- 当 Token 统计规则升级后，可在管理台概览页点击「重新分析 Token」批量更新历史数据；后端接口：`POST /admin/api/reanalyze`（管理员权限）
+- 流式请求自动补齐 `stream_options.include_usage=true`
+- 入库时 `token_analysis`：prompt 按角色拆分，completion 按类别拆分
+- 优先展示 provider 真实 `usage`，结构分析做比例映射
+- 管理台支持一键「重新分析 Token」批量更新历史数据
 
-当配置了 `PROVIDER_ROUTES_JSON` 时，可通过前缀路由到不同 Provider：
+## 多 Provider 路由
+
+配置 `PROVIDER_ROUTES_JSON` 后可通过前缀路由到不同 Provider：
 
 - `/openai/v1/chat/completions`
 - `/claude/v1/messages`
 
 ## 多轮对话关联
 
-代理会根据请求中的 system prompt、model、client IP 自动计算会话指纹 (`conv_fingerprint`)，将属于同一多轮对话的请求关联在一起：
-
-- Trace 列表中显示彩色会话标识和消息数，点击可筛选同一会话的所有请求
-- 详情面板新增「会话时间线」标签页，按时间顺序展示同一会话的全部调用
-- 支持通过 API `GET /admin/api/conversation/{fingerprint}` 查询会话时间线
+根据 system prompt、model、client IP 自动计算会话指纹 (`conv_fingerprint`)，关联同一对话的多次请求。Trace 列表显示彩色标识，详情页有会话时间线标签页。
 
 ## 敏感信息脱敏
 
-代理在日志持久化、API 返回、前端展示三层均自动脱敏敏感信息：
+日志持久化、API 返回、前端展示三层均自动脱敏：
 
-- **API Key / Bearer Token**：`authorization`、`api_key`、`access_token` 等字段自动遮罩，`sk-xxx...xxxx` 格式保留首尾
-- **下游 URL 域名**：`url`、`downstream_url`、`base_url` 等字段中的主机名被脱敏，保留 scheme、端口和路径
-  - 例：`https://llm.snow13.top:30006/v1/chat` → `https://llm***top:30006/v1/chat`
-- **Provider downstream_apikey**：仅返回脱敏后的掩码字段，原始值不出库
-- **全链路覆盖**：入库前脱敏（JSONL + SQLite）、API 返回时脱敏、前端 JS 双重校验
+- **API Key / Bearer Token**：`sk-xxx...xxxx` 格式保留首尾
+- **下游 URL 域名**：主机名脱敏，保留 scheme、端口和路径
+- **Provider downstream_apikey**：仅返回掩码字段，原始值不出库
+- **全链路覆盖**：入库、API、前端 JS 三层校验
 
 ## 开发
 
@@ -88,15 +95,12 @@ uv run pytest
 
 ## 性能与并发优化
 
-项目在高负载场景下做了以下优化，确保代理延迟低、吞吐量高：
-
-- **SQLite 读写分离**：持久化复用读/写连接（WAL 模式 + `synchronous=NORMAL`），避免每次请求新建连接
-- **日志批量写入**：后台 worker 批量收集最多 64 条日志，单事务写入 SQLite + 一次性追加 JSONL，大幅降低 I/O 开销
-- **用户认证缓存**：API Key 查询结果带 60s TTL 缓存，代理热路径不再逐次查库
-- **Provider 价格缓存**：同样 60s TTL，避免每条日志写入时查询价格表
-- **httpx 连接池调优**：max_connections=200, max_keepalive=40, keepalive_expiry=30s，适配 LLM 长连接场景
+- SQLite 读写分离（WAL + `synchronous=NORMAL`）
+- 后台 worker 批量写入（最多 64 条/批）
+- 用户认证 + Provider 价格 60s TTL 缓存
+- httpx 连接池调优（200 connections, 40 keepalive）
 
 ## 版本
 
-- 当前版本：`0.4.1`
-- 最新标签：`v0.4.1`
+- 当前版本：`1.0.0`
+- 最新标签：`v1.0.0`

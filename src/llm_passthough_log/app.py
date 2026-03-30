@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 
 from llm_passthough_log.config import Settings
-from llm_passthough_log.storage import LogStore, decode_payload, dumps_json, generate_api_key, hash_password
+from llm_passthough_log.storage import LogStore, decode_payload, dumps_json, generate_api_key, hash_api_key, hash_password
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -124,6 +124,16 @@ def filter_request_headers(headers: Dict[str, str]) -> Dict[str, str]:
         for key, value in headers.items()
         if key.lower() not in HOP_BY_HOP_HEADERS and key.lower() != "host"
     }
+
+
+def extract_bearer_token(headers: Dict[str, str]) -> Optional[str]:
+    """Extract the raw Bearer token from request headers."""
+    auth = headers.get("authorization", "") or headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+        if token:
+            return token
+    return None
 
 
 def filter_response_headers(headers: httpx.Headers) -> Dict[str, str]:
@@ -433,6 +443,10 @@ def create_app(
         user = _require_auth(user)
         allowed = await _get_allowed_providers(user)
         bounded_page_size = min(page_size, resolved_settings.admin_page_size_max)
+        # Non-admin users can only see chat/completions and embeddings
+        effective_path = path_contains
+        if user.get("role") != "admin" and effective_path not in ("chat/completions", "embeddings"):
+            effective_path = "chat/completions"
         payload = await runtime.log_store.list_logs(
             query=q,
             provider=provider,
@@ -440,7 +454,7 @@ def create_app(
             status=status,
             method=method,
             stream=stream,
-            path_contains=path_contains,
+            path_contains=effective_path,
             time_from=time_from,
             time_to=time_to,
             duration_min=duration_min,
@@ -662,6 +676,118 @@ def create_app(
         await runtime.refresh_provider_cache()
         return {"ok": True}
 
+    # ── Search page (public, no auth) ─────────────────────────────────────
+
+    search_html = static_dir / "search.html"
+
+    @app.get("/search", include_in_schema=False)
+    async def search_page() -> FileResponse:
+        return FileResponse(search_html)
+
+    @app.post("/search/api/verify-keys", include_in_schema=False)
+    async def search_verify_keys(request: Request) -> Dict[str, Any]:
+        """Verify API keys and return per-key record counts."""
+        data = await request.json()
+        keys = data.get("keys", [])
+        if not isinstance(keys, list) or not keys:
+            raise HTTPException(status_code=422, detail="'keys' must be a non-empty list")
+        if len(keys) > 50:
+            raise HTTPException(status_code=422, detail="too many keys (max 50)")
+        key_hashes = {hash_api_key(k): k for k in keys if isinstance(k, str) and k.strip()}
+        if not key_hashes:
+            raise HTTPException(status_code=422, detail="no valid keys provided")
+        counts = await runtime.log_store.verify_api_key_hashes(list(key_hashes.keys()))
+        # Return masked key -> count mapping
+        results = {}
+        for kh, raw_key in key_hashes.items():
+            results[kh] = {
+                "count": counts.get(kh, 0),
+                "masked_key": mask_secret(raw_key),
+            }
+        return {"keys": results}
+
+    @app.post("/search/api/logs", include_in_schema=False)
+    async def search_logs(request: Request) -> Dict[str, Any]:
+        """Search logs filtered by API keys. Non-admin can only see chat/completions and embeddings."""
+        data = await request.json()
+        keys = data.get("keys", [])
+        if not isinstance(keys, list) or not keys:
+            raise HTTPException(status_code=422, detail="at least one API key is required")
+        key_hashes = [hash_api_key(k) for k in keys if isinstance(k, str) and k.strip()]
+        if not key_hashes:
+            raise HTTPException(status_code=422, detail="no valid keys provided")
+
+        # For non-admin search, restrict path to chat/completions and embeddings
+        path_contains = str(data.get("path_contains", "")).strip()
+        allowed_paths = ["chat/completions", "embeddings"]
+        if path_contains and path_contains not in allowed_paths:
+            path_contains = "chat/completions"
+        if not path_contains:
+            path_contains = ""
+
+        q = str(data.get("q", "")).strip()
+        model = str(data.get("model", "")).strip()
+        status_val = data.get("status")
+        method_val = str(data.get("method", "")).strip()
+        stream_val = data.get("stream")
+        time_from = data.get("time_from")
+        time_to = data.get("time_to")
+        duration_min = data.get("duration_min")
+        duration_max = data.get("duration_max")
+        page = max(int(data.get("page", 1)), 1)
+        page_size = min(max(int(data.get("page_size", resolved_settings.admin_page_size_default)), 1),
+                        resolved_settings.admin_page_size_max)
+
+        payload = await runtime.log_store.list_logs(
+            query=q,
+            provider="",
+            model=model,
+            status=int(status_val) if status_val is not None else None,
+            method=method_val,
+            stream=bool(stream_val) if stream_val is not None else None,
+            path_contains=path_contains,
+            time_from=float(time_from) if time_from is not None else None,
+            time_to=float(time_to) if time_to is not None else None,
+            duration_min=float(duration_min) if duration_min is not None else None,
+            duration_max=float(duration_max) if duration_max is not None else None,
+            page=page,
+            page_size=page_size,
+            api_key_hashes=key_hashes,
+        )
+        return sanitize_for_web(payload)
+
+    @app.post("/search/api/logs/{log_id}", include_in_schema=False)
+    async def search_log_detail(log_id: str, request: Request) -> Dict[str, Any]:
+        """Get log detail, verifying API key ownership."""
+        data = await request.json()
+        keys = data.get("keys", [])
+        if not isinstance(keys, list) or not keys:
+            raise HTTPException(status_code=422, detail="at least one API key is required")
+        key_hashes = [hash_api_key(k) for k in keys if isinstance(k, str) and k.strip()]
+        if not key_hashes:
+            raise HTTPException(status_code=422, detail="no valid keys provided")
+
+        log_entry = await runtime.log_store.get_log_with_key_check(log_id, key_hashes)
+        if log_entry is None:
+            raise HTTPException(status_code=404, detail="log not found or access denied")
+        return sanitize_for_web(log_entry)
+
+    @app.post("/search/api/conversation/{fingerprint}", include_in_schema=False)
+    async def search_conversation_timeline(fingerprint: str, request: Request) -> Dict[str, Any]:
+        """Get conversation timeline filtered by API keys."""
+        data = await request.json()
+        keys = data.get("keys", [])
+        if not isinstance(keys, list) or not keys:
+            raise HTTPException(status_code=422, detail="at least one API key is required")
+        key_hashes = [hash_api_key(k) for k in keys if isinstance(k, str) and k.strip()]
+        if not key_hashes:
+            raise HTTPException(status_code=422, detail="no valid keys provided")
+
+        items = await runtime.log_store.list_conversation_logs(
+            fingerprint, api_key_hashes=key_hashes
+        )
+        return sanitize_for_web({"items": items, "fingerprint": fingerprint})
+
     @app.api_route("/", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"], include_in_schema=False)
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"], include_in_schema=False)
     async def proxy(request: Request, path: str = "") -> Response:
@@ -718,6 +844,11 @@ def create_app(
             "request_headers": dict(request.headers),
             "request_body": request_body,
         }
+
+        # Store hashed API key for search-by-key feature
+        _raw_bearer = extract_bearer_token(dict(request.headers))
+        if _raw_bearer:
+            log_entry["api_key_hash"] = hash_api_key(_raw_bearer)
 
         downstream_request = runtime.http_client.build_request(
             request.method,

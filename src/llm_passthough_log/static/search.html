@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM Log Search</title>
+    <link rel="stylesheet" href="/admin/assets/search.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- ── 顶部导航 ── -->
+      <nav class="topbar">
+        <div class="topbar-left">
+          <div class="brand-icon">◈</div>
+          <span class="topbar-brand-text">LLM Log Search</span>
+        </div>
+        <div class="topbar-right">
+          <span class="topbar-info">Keys: <strong id="activeKeyCount">0</strong></span>
+          <span class="topbar-info">Records: <strong id="totalRecords">-</strong></span>
+        </div>
+      </nav>
+
+      <!-- ── API Key 管理区域 ── -->
+      <div class="key-manager" id="keyManager">
+        <div class="key-header">
+          <div class="key-header-left">
+            <button id="toggleKeyPanel" class="key-toggle-btn" title="折叠/展开">▾</button>
+            <h3>🔑 API Keys</h3>
+            <span class="key-summary" id="keySummary"></span>
+          </div>
+          <div class="key-header-right">
+            <button id="selectAllKeys" class="ghost btn-sm">全选</button>
+            <button id="deselectAllKeys" class="ghost btn-sm">全不选</button>
+          </div>
+        </div>
+        <div id="keyPanelBody" class="key-panel-body">
+          <div class="key-add-row">
+            <input type="text" id="newKeyInput" placeholder="输入 API Key（如 sk-xxxxx）" autocomplete="off" />
+            <input type="text" id="newKeyLabel" placeholder="别名（可选，方便区分）" autocomplete="off" />
+            <button id="addKeyBtn" class="btn-primary">添加</button>
+          </div>
+          <div id="keyList" class="key-list">
+            <!-- key items rendered here -->
+          </div>
+        </div>
+      </div>
+
+      <!-- ── 无 Key 提示 ── -->
+      <div class="no-key-overlay" id="noKeyOverlay">
+        <div class="no-key-content">
+          <div class="no-key-icon">🔑</div>
+          <h2>请先添加 API Key</h2>
+          <p>在上方输入框中添加至少一个 API Key，系统将展示与该 Key 关联的所有 LLM 请求记录。</p>
+        </div>
+      </div>
+
+      <!-- ── 主内容区 ── -->
+      <div class="main-area" id="mainArea" style="display:none">
+        <div class="traces-layout">
+          <!-- 左侧：列表 -->
+          <div class="trace-list-pane">
+            <div class="list-header">
+              <h2>Traces</h2>
+              <button id="refreshLogs" class="icon-btn" title="刷新">⟳</button>
+            </div>
+            <div id="categoryBar" class="category-bar">
+              <button class="cat-btn active" data-path="chat/completions">LLM 对话</button>
+              <button class="cat-btn" data-path="embeddings">Embeddings</button>
+            </div>
+            <form id="searchForm" class="search-bar">
+              <input type="text" name="q" placeholder="搜索 prompt、模型名、内容…" />
+              <button type="submit" class="icon-btn search-btn">⏎</button>
+              <button type="button" id="toggleFilters" class="icon-btn" title="高级筛选">⚙</button>
+            </form>
+            <div id="advancedFilters" class="adv-filters" style="display:none">
+              <div class="filter-group">
+                <label class="filter-label">时间范围</label>
+                <div class="filter-row">
+                  <input type="datetime-local" id="filterTimeFrom" placeholder="开始时间" />
+                  <span class="filter-sep">—</span>
+                  <input type="datetime-local" id="filterTimeTo" placeholder="结束时间" />
+                </div>
+                <div class="quick-time-btns">
+                  <button type="button" class="qtime-btn" data-hours="1">1h</button>
+                  <button type="button" class="qtime-btn" data-hours="6">6h</button>
+                  <button type="button" class="qtime-btn" data-hours="24">24h</button>
+                  <button type="button" class="qtime-btn" data-hours="72">3天</button>
+                  <button type="button" class="qtime-btn" data-hours="168">7天</button>
+                  <button type="button" class="qtime-btn" data-hours="0">全部</button>
+                </div>
+              </div>
+              <div class="filter-group">
+                <label class="filter-label">耗时范围 (ms)</label>
+                <div class="filter-row">
+                  <input type="number" id="filterDurMin" placeholder="最小" min="0" step="100" />
+                  <span class="filter-sep">—</span>
+                  <input type="number" id="filterDurMax" placeholder="最大" min="0" step="100" />
+                </div>
+              </div>
+              <div class="filter-group">
+                <label class="filter-label">基本筛选</label>
+                <div class="filter-grid">
+                  <input type="text" name="model" placeholder="Model" form="searchForm" />
+                  <input type="number" name="status" placeholder="状态码" form="searchForm" />
+                </div>
+              </div>
+              <div class="filter-actions">
+                <button type="button" id="clearFilters" class="ghost btn-sm">清除筛选</button>
+              </div>
+            </div>
+            <div id="logMeta" class="list-meta"></div>
+            <div id="traceList" class="trace-items"></div>
+            <div class="pager">
+              <button id="prevPage" class="ghost" disabled>‹</button>
+              <span id="pageInfo">1 / 1</span>
+              <button id="nextPage" class="ghost" disabled>›</button>
+            </div>
+          </div>
+
+          <!-- 右侧：详情 -->
+          <div class="trace-detail-pane" id="detailSection">
+            <div id="detailPane" class="detail-placeholder">
+              <div class="placeholder-icon">◈</div>
+              <p>选择左侧 Trace 查看详情</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script src="/admin/assets/search.js" defer></script>
+  </body>
+</html>

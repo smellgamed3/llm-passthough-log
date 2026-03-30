@@ -345,6 +345,11 @@ def analyze_token_breakdown(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
+def hash_api_key(api_key: str) -> str:
+    """Compute a SHA-256 hash of an API key for storage/matching."""
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+
+
 def generate_api_key() -> str:
     """Generate a cryptographically random sk-prefixed API key."""
     return "sk-" + secrets.token_urlsafe(32)
@@ -501,6 +506,7 @@ class LogStore:
         page: int,
         page_size: int,
         allowed_providers: Optional[List[str]] = None,
+        api_key_hashes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         return await asyncio.to_thread(
             self._list_logs_sync,
@@ -518,6 +524,7 @@ class LogStore:
             page,
             page_size,
             allowed_providers,
+            api_key_hashes,
         )
 
     async def get_log(self, log_id: str) -> Optional[Dict[str, Any]]:
@@ -667,7 +674,10 @@ class LogStore:
                 conn.execute("ALTER TABLE logs ADD COLUMN conv_fingerprint TEXT")
             if "msg_count" not in cols:
                 conn.execute("ALTER TABLE logs ADD COLUMN msg_count INTEGER DEFAULT 0")
+            if "api_key_hash" not in cols:
+                conn.execute("ALTER TABLE logs ADD COLUMN api_key_hash TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_conv_fingerprint ON logs(conv_fingerprint)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_api_key_hash ON logs(api_key_hash)")
             conn.commit()
 
     def _prepare_entry(self, entry: Dict[str, Any]) -> tuple:
@@ -718,6 +728,7 @@ class LogStore:
             entry.get("user_id"),
             conv_fp,
             mc,
+            entry.get("api_key_hash"),
         )
         return line, db_params
 
@@ -726,8 +737,9 @@ class LogStore:
             id, created_at, method, path, query_string, target_url,
             provider, request_model, request_stream, response_status,
             duration_ms, search_blob, preview, entry_json,
-            estimated_cost, user_id, conv_fingerprint, msg_count
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            estimated_cost, user_id, conv_fingerprint, msg_count,
+            api_key_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
 
     def _write_batch_sync(self, entries: List[Dict[str, Any]]) -> None:
@@ -823,6 +835,7 @@ class LogStore:
         page: int,
         page_size: int,
         allowed_providers: Optional[List[str]] = None,
+        api_key_hashes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         where: List[str] = []
         params: List[Any] = []
@@ -832,6 +845,12 @@ class LogStore:
             placeholders = ",".join("?" * len(allowed_providers))
             where.append(f"provider IN ({placeholders})")
             params.extend(allowed_providers)
+        if api_key_hashes is not None:
+            if not api_key_hashes:
+                return {"items": [], "pagination": {"page": 1, "page_size": page_size, "total": 0, "pages": 1}}
+            placeholders = ",".join("?" * len(api_key_hashes))
+            where.append(f"api_key_hash IN ({placeholders})")
+            params.extend(api_key_hashes)
         if query:
             where.append("search_blob LIKE ?")
             params.append(f"%{query.lower()}%")
@@ -910,6 +929,41 @@ class LogStore:
             return None
         return json.loads(row[0])
 
+    async def get_log_with_key_check(self, log_id: str, api_key_hashes: List[str]) -> Optional[Dict[str, Any]]:
+        """Get a log entry only if its api_key_hash matches one of the provided hashes."""
+        return await asyncio.to_thread(self._get_log_with_key_check_sync, log_id, api_key_hashes)
+
+    def _get_log_with_key_check_sync(self, log_id: str, api_key_hashes: List[str]) -> Optional[Dict[str, Any]]:
+        if not api_key_hashes:
+            return None
+        conn = self._get_read_conn()
+        placeholders = ",".join("?" * len(api_key_hashes))
+        with self._conn_lock:
+            row = conn.execute(
+                f"SELECT entry_json FROM logs WHERE id = ? AND api_key_hash IN ({placeholders})",
+                [log_id, *api_key_hashes],
+            ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0])
+
+    async def verify_api_key_hashes(self, key_hashes: List[str]) -> Dict[str, int]:
+        """Return a mapping of key_hash -> record count for each matching hash."""
+        return await asyncio.to_thread(self._verify_api_key_hashes_sync, key_hashes)
+
+    def _verify_api_key_hashes_sync(self, key_hashes: List[str]) -> Dict[str, int]:
+        if not key_hashes:
+            return {}
+        conn = self._get_read_conn()
+        result: Dict[str, int] = {}
+        with self._conn_lock:
+            for kh in key_hashes:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM logs WHERE api_key_hash = ?", (kh,)
+                ).fetchone()
+                result[kh] = row[0] if row else 0
+        return result
+
     # ── Batch reanalysis ─────────────────────────────────────────────────
 
     async def reanalyze_token_breakdowns(self) -> Dict[str, int]:
@@ -947,15 +1001,17 @@ class LogStore:
         fingerprint: str,
         *,
         allowed_providers: Optional[List[str]] = None,
+        api_key_hashes: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         return await asyncio.to_thread(
-            self._list_conversation_logs_sync, fingerprint, allowed_providers
+            self._list_conversation_logs_sync, fingerprint, allowed_providers, api_key_hashes
         )
 
     def _list_conversation_logs_sync(
         self,
         fingerprint: str,
         allowed_providers: Optional[List[str]] = None,
+        api_key_hashes: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         where = ["conv_fingerprint = ?"]
         params: List[Any] = [fingerprint]
@@ -965,6 +1021,12 @@ class LogStore:
             placeholders = ",".join("?" * len(allowed_providers))
             where.append(f"provider IN ({placeholders})")
             params.extend(allowed_providers)
+        if api_key_hashes is not None:
+            if not api_key_hashes:
+                return []
+            placeholders = ",".join("?" * len(api_key_hashes))
+            where.append(f"api_key_hash IN ({placeholders})")
+            params.extend(api_key_hashes)
         where_sql = "WHERE " + " AND ".join(where)
         conn = self._get_read_conn()
         with self._conn_lock:
