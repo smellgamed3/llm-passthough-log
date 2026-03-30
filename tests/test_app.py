@@ -784,3 +784,426 @@ def test_password_login_flow(tmp_path):
             "password": "newpassword456",
         })
         assert resp.status_code == 200
+
+
+# ════════════════ Search API Tests ════════════════
+
+
+def _make_app_with_logged_request(tmp_path, api_key="sk-test-search-001", model="gpt-test", user_msg="hello"):
+    """Helper: create app, proxy one request with given key, return (app, key_hash)."""
+    from llm_passthough_log.storage import hash_api_key
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={"id": "resp_1", "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                  "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}},
+        )
+
+    app = create_app(build_settings(tmp_path), downstream_transport=httpx.MockTransport(handler))
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/chat/completions",
+            json={"model": model, "messages": [{"role": "user", "content": user_msg}]},
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        assert resp.status_code == 200
+    return app, hash_api_key(api_key)
+
+
+def test_search_verify_keys_with_hashes(tmp_path):
+    """verify-keys 接收 key_hashes 应返回匹配的记录数"""
+    app, key_hash = _make_app_with_logged_request(tmp_path)
+    with TestClient(app) as client:
+        resp = client.post("/search/api/verify-keys", json={"key_hashes": [key_hash]})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert key_hash in data["keys"]
+        assert data["keys"][key_hash]["count"] >= 1
+
+
+def test_search_verify_keys_with_raw_keys(tmp_path):
+    """verify-keys 接收原始 key 应自动 hash 后匹配"""
+    raw_key = "sk-test-raw-verify"
+    app, key_hash = _make_app_with_logged_request(tmp_path, api_key=raw_key)
+    with TestClient(app) as client:
+        resp = client.post("/search/api/verify-keys", json={"keys": [raw_key]})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert key_hash in data["keys"]
+        assert data["keys"][key_hash]["count"] >= 1
+
+
+def test_search_verify_keys_no_keys_returns_422(tmp_path):
+    """verify-keys 不提供任何 key 应返回 422"""
+    app = create_app(
+        build_settings(tmp_path),
+        downstream_transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True})),
+    )
+    with TestClient(app) as client:
+        resp = client.post("/search/api/verify-keys", json={"key_hashes": []})
+        assert resp.status_code == 422
+
+        resp = client.post("/search/api/verify-keys", json={})
+        assert resp.status_code == 422
+
+
+def test_search_verify_keys_invalid_hash_ignored(tmp_path):
+    """无效的 hash 格式应被忽略，有效的正常返回"""
+    app, key_hash = _make_app_with_logged_request(tmp_path)
+    with TestClient(app) as client:
+        resp = client.post("/search/api/verify-keys", json={"key_hashes": ["not-a-valid-hash", key_hash]})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert key_hash in data["keys"]
+        assert "not-a-valid-hash" not in data["keys"]
+
+
+def test_search_logs_with_key_hashes(tmp_path):
+    """search/api/logs 通过 key_hashes 检索日志"""
+    app, key_hash = _make_app_with_logged_request(tmp_path)
+    with TestClient(app) as client:
+        resp = client.post("/search/api/logs", json={"key_hashes": [key_hash]})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["pagination"]["total"] >= 1
+        assert data["items"][0]["request_model"] == "gpt-test"
+
+
+def test_search_logs_with_raw_keys(tmp_path):
+    """search/api/logs 通过原始 key 检索日志"""
+    raw_key = "sk-test-raw-search"
+    app, _ = _make_app_with_logged_request(tmp_path, api_key=raw_key)
+    with TestClient(app) as client:
+        resp = client.post("/search/api/logs", json={"keys": [raw_key]})
+        assert resp.status_code == 200
+        assert resp.json()["pagination"]["total"] >= 1
+
+
+def test_search_logs_no_keys_returns_422(tmp_path):
+    """search/api/logs 不提供 key 应 422"""
+    app = create_app(
+        build_settings(tmp_path),
+        downstream_transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True})),
+    )
+    with TestClient(app) as client:
+        resp = client.post("/search/api/logs", json={})
+        assert resp.status_code == 422
+
+
+def test_search_logs_wrong_key_returns_empty(tmp_path):
+    """使用错误的 key 检索不到任何记录"""
+    from llm_passthough_log.storage import hash_api_key
+    app, _ = _make_app_with_logged_request(tmp_path, api_key="sk-correct-key")
+    wrong_hash = hash_api_key("sk-wrong-key")
+    with TestClient(app) as client:
+        resp = client.post("/search/api/logs", json={"key_hashes": [wrong_hash]})
+        assert resp.status_code == 200
+        assert resp.json()["pagination"]["total"] == 0
+
+
+def test_search_logs_path_restriction(tmp_path):
+    """search API 限制 path 只能是 chat/completions 或 embeddings"""
+    app, key_hash = _make_app_with_logged_request(tmp_path)
+    with TestClient(app) as client:
+        resp = client.post("/search/api/logs", json={
+            "key_hashes": [key_hash],
+            "path_contains": "admin/secret",
+        })
+        assert resp.status_code == 200
+        # 非法 path 被重置，仍能查到 chat/completions 的记录
+        assert resp.json()["pagination"]["total"] >= 1
+
+
+def test_search_log_detail_with_valid_key(tmp_path):
+    """search/api/logs/{id} 用正确的 key 可以查看详情"""
+    app, key_hash = _make_app_with_logged_request(tmp_path)
+    with TestClient(app) as client:
+        logs = client.post("/search/api/logs", json={"key_hashes": [key_hash]}).json()
+        log_id = logs["items"][0]["id"]
+        resp = client.post(f"/search/api/logs/{log_id}", json={"key_hashes": [key_hash]})
+        assert resp.status_code == 200
+        detail = resp.json()
+        assert detail["response_status"] == 200
+
+
+def test_search_log_detail_wrong_key_returns_404(tmp_path):
+    """search/api/logs/{id} 用错误 key 应返回 404"""
+    from llm_passthough_log.storage import hash_api_key
+    app, key_hash = _make_app_with_logged_request(tmp_path)
+    with TestClient(app) as client:
+        logs = client.post("/search/api/logs", json={"key_hashes": [key_hash]}).json()
+        log_id = logs["items"][0]["id"]
+        wrong_hash = hash_api_key("sk-intruder-key")
+        resp = client.post(f"/search/api/logs/{log_id}", json={"key_hashes": [wrong_hash]})
+        assert resp.status_code == 404
+
+
+def test_search_log_detail_no_keys_returns_422(tmp_path):
+    """search/api/logs/{id} 不提供 key 应 422"""
+    app, key_hash = _make_app_with_logged_request(tmp_path)
+    with TestClient(app) as client:
+        logs = client.post("/search/api/logs", json={"key_hashes": [key_hash]}).json()
+        log_id = logs["items"][0]["id"]
+        resp = client.post(f"/search/api/logs/{log_id}", json={})
+        assert resp.status_code == 422
+
+
+def test_search_conversation_timeline(tmp_path):
+    """search/api/conversation/{fp} 通过 key 获取会话时间线"""
+    app, key_hash = _make_app_with_logged_request(tmp_path)
+    with TestClient(app) as client:
+        logs = client.post("/search/api/logs", json={"key_hashes": [key_hash]}).json()
+        item = logs["items"][0]
+        fp = item.get("conv_fingerprint")
+        if fp:
+            resp = client.post(f"/search/api/conversation/{fp}", json={"key_hashes": [key_hash]})
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "items" in data
+            assert len(data["items"]) >= 1
+
+
+def test_search_conversation_wrong_key_empty(tmp_path):
+    """search/api/conversation/{fp} 用错误 key 应返回空列表"""
+    from llm_passthough_log.storage import hash_api_key
+    app, key_hash = _make_app_with_logged_request(tmp_path)
+    with TestClient(app) as client:
+        logs = client.post("/search/api/logs", json={"key_hashes": [key_hash]}).json()
+        item = logs["items"][0]
+        fp = item.get("conv_fingerprint")
+        if fp:
+            wrong_hash = hash_api_key("sk-intruder-key")
+            resp = client.post(f"/search/api/conversation/{fp}", json={"key_hashes": [wrong_hash]})
+            assert resp.status_code == 200
+            assert len(resp.json()["items"]) == 0
+
+
+# ════════════════ _extract_search_hashes Unit Tests ════════════════
+
+
+def test_extract_search_hashes_mixed():
+    """同时提供 keys 和 key_hashes 应合并去重"""
+    from llm_passthough_log.app import _extract_search_hashes
+    from llm_passthough_log.storage import hash_api_key
+
+    raw_key = "sk-test-mixed"
+    expected_hash = hash_api_key(raw_key)
+
+    result = _extract_search_hashes({
+        "keys": [raw_key],
+        "key_hashes": [expected_hash],
+    })
+    assert result == [expected_hash]
+
+
+def test_extract_search_hashes_empty():
+    """空输入应返回空列表"""
+    from llm_passthough_log.app import _extract_search_hashes
+    assert _extract_search_hashes({}) == []
+    assert _extract_search_hashes({"keys": [], "key_hashes": []}) == []
+
+
+def test_extract_search_hashes_filters_invalid():
+    """无效的 hash 格式应被过滤"""
+    from llm_passthough_log.app import _extract_search_hashes
+    valid_hash = "a" * 64
+    result = _extract_search_hashes({
+        "key_hashes": ["short", "ZZZZ" * 16, valid_hash, ""],
+    })
+    assert result == [valid_hash]
+
+
+def test_extract_search_hashes_whitespace_keys():
+    """空白字符的 key 应被过滤"""
+    from llm_passthough_log.app import _extract_search_hashes
+    result = _extract_search_hashes({"keys": ["", "  ", "valid-key"]})
+    assert len(result) == 1
+
+
+# ════════════════ Admin Log Filters ════════════════
+
+
+def test_admin_logs_filter_by_model(tmp_path):
+    """admin 日志筛选：按 model 精确筛选"""
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "application/json"},
+                              json={"id": "r1", "choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+    app = create_app(build_settings(tmp_path), downstream_transport=httpx.MockTransport(handler))
+    with TestClient(app) as client:
+        client.post("/v1/chat/completions", json={"model": "gpt-4", "messages": [{"role": "user", "content": "a"}]})
+        client.post("/v1/chat/completions", json={"model": "claude-3", "messages": [{"role": "user", "content": "b"}]})
+
+    with TestClient(app) as client:
+        h = login_admin(client)
+        all_logs = client.get("/admin/api/logs", headers=h).json()
+        assert all_logs["pagination"]["total"] == 2
+
+        gpt = client.get("/admin/api/logs?model=gpt-4", headers=h).json()
+        assert gpt["pagination"]["total"] == 1
+        assert gpt["items"][0]["request_model"] == "gpt-4"
+
+        none_resp = client.get("/admin/api/logs?model=nonexistent", headers=h).json()
+        assert none_resp["pagination"]["total"] == 0
+
+
+def test_admin_logs_filter_by_conv_fingerprint(tmp_path):
+    """admin 日志筛选：按 conv_fingerprint"""
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "application/json"},
+                              json={"id": "r1", "choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+    app = create_app(build_settings(tmp_path), downstream_transport=httpx.MockTransport(handler))
+    with TestClient(app) as client:
+        client.post("/v1/chat/completions", json={
+            "model": "gpt-4",
+            "messages": [{"role": "system", "content": "sys-a"}, {"role": "user", "content": "hi"}],
+        })
+        client.post("/v1/chat/completions", json={
+            "model": "gpt-4",
+            "messages": [{"role": "system", "content": "sys-b"}, {"role": "user", "content": "hi"}],
+        })
+
+    with TestClient(app) as client:
+        h = login_admin(client)
+        all_logs = client.get("/admin/api/logs", headers=h).json()
+        assert all_logs["pagination"]["total"] == 2
+
+        fp0 = all_logs["items"][0]["conv_fingerprint"]
+        fp1 = all_logs["items"][1]["conv_fingerprint"]
+        assert fp0 != fp1
+
+        filtered = client.get(f"/admin/api/logs?conv_fingerprint={fp0}", headers=h).json()
+        assert filtered["pagination"]["total"] == 1
+        assert filtered["items"][0]["conv_fingerprint"] == fp0
+
+
+def test_search_logs_filter_by_conv_fingerprint(tmp_path):
+    """search API 日志筛选：按 conv_fingerprint"""
+    raw_key = "sk-fp-test-key"
+    from llm_passthough_log.storage import hash_api_key
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "application/json"},
+                              json={"id": "r1", "choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+    app = create_app(build_settings(tmp_path), downstream_transport=httpx.MockTransport(handler))
+    key_hash = hash_api_key(raw_key)
+
+    with TestClient(app) as client:
+        client.post("/v1/chat/completions", json={
+            "model": "gpt-4", "messages": [{"role": "system", "content": "a"}, {"role": "user", "content": "hi"}],
+        }, headers={"Authorization": f"Bearer {raw_key}"})
+        client.post("/v1/chat/completions", json={
+            "model": "gpt-4", "messages": [{"role": "system", "content": "b"}, {"role": "user", "content": "hi"}],
+        }, headers={"Authorization": f"Bearer {raw_key}"})
+
+    with TestClient(app) as client:
+        all_logs = client.post("/search/api/logs", json={"key_hashes": [key_hash]}).json()
+        assert all_logs["pagination"]["total"] == 2
+
+        fp0 = all_logs["items"][0]["conv_fingerprint"]
+        filtered = client.post("/search/api/logs", json={
+            "key_hashes": [key_hash],
+            "conv_fingerprint": fp0,
+        }).json()
+        assert filtered["pagination"]["total"] == 1
+        assert filtered["items"][0]["conv_fingerprint"] == fp0
+
+
+def test_search_logs_filter_by_model(tmp_path):
+    """search API 日志筛选：按 model"""
+    raw_key = "sk-model-filter-key"
+    from llm_passthough_log.storage import hash_api_key
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "application/json"},
+                              json={"id": "r1", "choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+    app = create_app(build_settings(tmp_path), downstream_transport=httpx.MockTransport(handler))
+    key_hash = hash_api_key(raw_key)
+
+    with TestClient(app) as client:
+        client.post("/v1/chat/completions", json={"model": "gpt-4", "messages": [{"role": "user", "content": "a"}]},
+                     headers={"Authorization": f"Bearer {raw_key}"})
+        client.post("/v1/chat/completions", json={"model": "claude-3", "messages": [{"role": "user", "content": "b"}]},
+                     headers={"Authorization": f"Bearer {raw_key}"})
+
+    with TestClient(app) as client:
+        all_resp = client.post("/search/api/logs", json={"key_hashes": [key_hash]}).json()
+        assert all_resp["pagination"]["total"] == 2
+
+        gpt = client.post("/search/api/logs", json={"key_hashes": [key_hash], "model": "gpt-4"}).json()
+        assert gpt["pagination"]["total"] == 1
+        assert gpt["items"][0]["request_model"] == "gpt-4"
+
+
+def test_search_logs_filter_by_stream(tmp_path):
+    """search API 日志筛选：按 stream"""
+    raw_key = "sk-stream-filter-key"
+    from llm_passthough_log.storage import hash_api_key
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "application/json"},
+                              json={"id": "r1", "choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+    app = create_app(build_settings(tmp_path), downstream_transport=httpx.MockTransport(handler))
+    key_hash = hash_api_key(raw_key)
+
+    with TestClient(app) as client:
+        client.post("/v1/chat/completions",
+                     json={"model": "gpt-4", "stream": False, "messages": [{"role": "user", "content": "a"}]},
+                     headers={"Authorization": f"Bearer {raw_key}"})
+
+    with TestClient(app) as client:
+        resp = client.post("/search/api/logs", json={"key_hashes": [key_hash], "stream": "false"}).json()
+        assert resp["pagination"]["total"] == 1
+
+        resp = client.post("/search/api/logs", json={"key_hashes": [key_hash], "stream": "true"}).json()
+        assert resp["pagination"]["total"] == 0
+
+
+# ════════════════ Misc Endpoints ════════════════
+
+
+def test_healthz_endpoint(tmp_path):
+    """/healthz 应返回 200"""
+    app = create_app(
+        build_settings(tmp_path),
+        downstream_transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True})),
+    )
+    with TestClient(app) as client:
+        resp = client.get("/healthz")
+        assert resp.status_code == 200
+
+
+def test_search_page_serves_html(tmp_path):
+    """/search 应返回 HTML"""
+    app = create_app(
+        build_settings(tmp_path),
+        downstream_transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True})),
+    )
+    with TestClient(app) as client:
+        resp = client.get("/search")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+
+
+def test_admin_logout(tmp_path):
+    """admin logout 应使 session 失效"""
+    app = create_app(
+        build_settings(tmp_path),
+        downstream_transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True})),
+    )
+    with TestClient(app) as client:
+        admin_headers = login_admin(client)
+        resp = client.get("/admin/api/overview", headers=admin_headers)
+        assert resp.status_code == 200
+
+        resp = client.post("/admin/api/logout", headers=admin_headers)
+        assert resp.status_code == 200
+
+        resp = client.get("/admin/api/overview", headers=admin_headers)
+        assert resp.status_code == 401
