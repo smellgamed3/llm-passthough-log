@@ -55,6 +55,7 @@ PROVIDER_ROUTES_JSON='{"openai":"https://api.openai.com","claude":"https://api.a
 - **权限隔离**：仅展示与用户提供的 API Key 匹配的记录，无法查看其他人的数据
 - **内容限制**：仅可查看 LLM 对话和 Embeddings 两类记录
 - **Key 脱敏**：页面上 API Key 始终脱敏显示（如 `sk-xxxx…abcd`）
+- **友好视图**：默认 Tab 展示 Token 用量分析、Prompt 构成明细、Completion 构成明细、请求参数，与管理台一致
 - **额外特性**：每个 Key 分配独立颜色标识、支持内联编辑别名、面板可折叠
 
 技术实现：代理转发时从请求的 `Authorization` 头提取原始 Bearer Token，计算 SHA-256 哈希存入 `api_key_hash` 字段。搜索页 POST 提交原始 Key，后端哈希后匹配，不暴露哈希值给客户端。
@@ -102,5 +103,5 @@ uv run pytest
 
 ## 版本
 
-- 当前版本：`1.0.0`
-- 最新标签：`v1.0.0`
+- 当前版本：`1.1.0`
+- 最新标签：`v1.1.0`
