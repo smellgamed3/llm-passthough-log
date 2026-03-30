@@ -211,9 +211,9 @@ function renderKeyList() {
         <span class="key-display-name" data-kid-name="${k.id}">${displayName}</span>
         ${subtitle ? `<span class="key-subtitle">${subtitle}</span>` : ''}
         ${countText ? `<span class="key-count">${countText}</span>` : ''}
-        <button class="key-copy-btn" data-copy="${k.id}" title="复制 Key Hash" onclick="event.stopPropagation()">📋</button>
-        <button class="key-edit-btn" data-edit="${k.id}" title="编辑别名" onclick="event.stopPropagation()">✎</button>
-        <button class="key-del-btn" data-del="${k.id}" title="删除" onclick="event.stopPropagation()">✕</button>
+        <button class="key-copy-btn" data-copy="${k.id}" title="复制 Key Hash">📋</button>
+        <button class="key-edit-btn" data-edit="${k.id}" title="编辑别名">✎</button>
+        <button class="key-del-btn" data-del="${k.id}" title="删除">✕</button>
       </div>`;
     }).join("");
   }
@@ -357,16 +357,18 @@ document.getElementById("newKeyInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); document.getElementById("addKeyBtn").click(); }
 });
 
-// Toggle / Delete / Edit / Copy keys
-document.getElementById("keyList").addEventListener("click", (e) => {
-  // Checkbox toggle
+// Checkbox toggle (via change event — immune to label stopPropagation)
+document.getElementById("keyList").addEventListener("change", (e) => {
   const toggleCb = e.target.closest("[data-toggle]");
   if (toggleCb) {
     const kid = toggleCb.dataset.toggle;
     const k = state.keys.find(x => x.id === kid);
     if (k) { k.active = toggleCb.checked; saveKeysToStorage(); renderKeyList(); if (getActiveKeyHashes().length > 0) loadLogs(); }
-    return;
   }
+});
+
+// Delete / Edit / Copy keys
+document.getElementById("keyList").addEventListener("click", (e) => {
   // Copy hash
   const copyBtn = e.target.closest("[data-copy]");
   if (copyBtn) {
@@ -395,7 +397,7 @@ document.getElementById("keyList").addEventListener("click", (e) => {
   }
   // Click on card body to toggle
   const card = e.target.closest(".key-item");
-  if (card && !e.target.closest("input, button, .key-edit-inline")) {
+  if (card && !e.target.closest("input, button, label, .key-edit-inline")) {
     const kid = card.dataset.kid;
     const k = state.keys.find(x => x.id === kid);
     if (k) { k.active = !k.active; saveKeysToStorage(); renderKeyList(); if (getActiveKeyHashes().length > 0) loadLogs(); }
