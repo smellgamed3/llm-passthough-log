@@ -422,7 +422,8 @@ function parseSSE(raw) {
       }
     } catch {}
   }
-  return { reasoning, content, model, finish, usage, toolCalls: toolCalls.length ? toolCalls : null };
+  const filtered = toolCalls.filter(Boolean);
+  return { reasoning, content, model, finish, usage, toolCalls: filtered.length ? filtered : null };
 }
 
 function extractResponse(entry) {
@@ -479,6 +480,7 @@ async function loadOverview() {
     document.getElementById("downstreamUrl").title = p.downstream_url || "";
   }
   document.getElementById("queueSize").textContent = p.queue_size ?? 0;
+  if (p.version) document.getElementById("versionInfo").textContent = "v" + p.version;
 
   const cards = [
     statCard("总请求数", t.total_requests ?? 0),
@@ -1202,6 +1204,7 @@ function renderResponseBlock(resp) {
   if (resp.toolCalls && resp.toolCalls.length) {
     html += '<div class="resp-tool-calls"><h5>模型工具调用</h5><div class="tool-grid">';
     for (const tc of resp.toolCalls) {
+      if (!tc) continue;
       const fn = tc.function || {};
       let args = fn.arguments || "";
       let argsHtml;

@@ -15,8 +15,15 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from importlib.metadata import version as _pkg_version
+
 from llm_passthough_log.config import Settings
 from llm_passthough_log.storage import LogStore, decode_payload, dumps_json, generate_api_key, hash_api_key, hash_password
+
+try:
+    APP_VERSION = _pkg_version("llm-passthough-log")
+except Exception:
+    APP_VERSION = "dev"
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -307,6 +314,7 @@ def create_app(
     async def healthz() -> Dict[str, Any]:
         return {
             "status": "ok",
+            "version": APP_VERSION,
             "downstream_url": resolved_settings.downstream_url,
             "jsonl_path": str(resolved_settings.jsonl_path),
             "sqlite_path": str(resolved_settings.sqlite_path),
@@ -439,6 +447,7 @@ def create_app(
         data = await runtime.log_store.overview(allowed_providers=allowed)
         result: Dict[str, Any] = {
             "title": resolved_settings.admin_title,
+            "version": APP_VERSION,
             "queue_size": runtime.log_store.queue_size,
             "data": data,
             "role": user.get("role", "user"),
