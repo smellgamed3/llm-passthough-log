@@ -466,14 +466,12 @@ document.getElementById("clearAllData").addEventListener("click", () => {
   renderKeyList();
 });
 
-// Collapse/expand key panel
-document.getElementById("toggleKeyPanel").addEventListener("click", () => {
-  const body = document.getElementById("keyPanelBody");
-  const btn = document.getElementById("toggleKeyPanel");
-  const collapsed = body.style.display === "none";
-  body.style.display = collapsed ? "" : "none";
-  btn.textContent = collapsed ? "▾" : "▸";
-  btn.closest(".key-manager").classList.toggle("collapsed", !collapsed);
+// Toggle add-key panel
+document.getElementById("addKeyToggle").addEventListener("click", () => {
+  const panel = document.getElementById("keyAddPanel");
+  const visible = panel.style.display !== "none";
+  panel.style.display = visible ? "none" : "flex";
+  if (!visible) document.getElementById("newKeyInput").focus();
 });
 
 /* ── API calls ────────────────────────────────────── */

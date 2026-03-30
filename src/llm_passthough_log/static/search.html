@@ -21,36 +21,28 @@
         </div>
       </nav>
 
-      <!-- ── API Key 管理区域 ── -->
-      <div class="key-manager" id="keyManager">
-        <div class="key-header">
-          <div class="key-header-left">
-            <button id="toggleKeyPanel" class="key-toggle-btn" title="折叠/展开">▾</button>
-            <h3>🔑 API Keys</h3>
-            <span class="key-summary" id="keySummary"></span>
-          </div>
-          <div class="key-header-right">
-            <button id="selectAllKeys" class="ghost btn-sm">全选</button>
-            <button id="deselectAllKeys" class="ghost btn-sm">全不选</button>
-            <button id="clearAllData" class="ghost btn-sm btn-danger" title="清除所有本地缓存数据">清理缓存</button>
-          </div>
+      <!-- ── API Key 管理区域（紧凑单行） ── -->
+      <div class="key-bar" id="keyManager">
+        <span class="key-bar-label">🔑</span>
+        <div id="keyList" class="key-list">
+          <!-- key items rendered here -->
         </div>
-        <div id="keyPanelBody" class="key-panel-body">
-          <div class="key-add-row">
-            <div class="key-input-mode">
-              <button class="mode-btn active" data-mode="key" id="modeKeyBtn">原始 Key</button>
-              <button class="mode-btn" data-mode="hash" id="modeHashBtn">Key Hash</button>
-            </div>
-            <input type="text" id="newKeyInput" placeholder="输入 API Key（如 sk-xxxxx）" autocomplete="off" />
-            <input type="text" id="newKeyLabel" placeholder="别名（可选）" autocomplete="off" />
-            <button id="addKeyBtn" class="btn-primary">添加</button>
+        <span class="key-summary" id="keySummary"></span>
+        <div class="key-bar-actions">
+          <button id="selectAllKeys" class="ghost btn-sm">全选</button>
+          <button id="deselectAllKeys" class="ghost btn-sm">全不选</button>
+          <button id="addKeyToggle" class="ghost btn-sm btn-accent" title="添加 Key">＋</button>
+          <button id="clearAllData" class="ghost btn-sm btn-danger" title="清除所有本地缓存数据">清理</button>
+        </div>
+        <!-- 内联添加 Key 区域（默认隐藏） -->
+        <div id="keyAddPanel" class="key-add-panel" style="display:none">
+          <div class="key-input-mode">
+            <button class="mode-btn active" data-mode="key" id="modeKeyBtn">Key</button>
+            <button class="mode-btn" data-mode="hash" id="modeHashBtn">Hash</button>
           </div>
-          <div class="key-security-note" id="keySecurityNote">
-            🔒 Key 仅以 SHA-256 哈希形式存储在浏览器本地，原始 Key 不会被保留。您也可以切换到「Key Hash」模式直接粘贴哈希值。
-          </div>
-          <div id="keyList" class="key-list">
-            <!-- key items rendered here -->
-          </div>
+          <input type="text" id="newKeyInput" placeholder="输入 API Key（如 sk-xxxxx）" autocomplete="off" />
+          <input type="text" id="newKeyLabel" placeholder="别名" autocomplete="off" />
+          <button id="addKeyBtn" class="btn-primary btn-sm">添加</button>
         </div>
       </div>
 
